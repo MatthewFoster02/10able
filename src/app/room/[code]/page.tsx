@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import { useSocket } from "@/hooks/useSocket";
 import { useRoomGameState } from "@/hooks/useGameState";
+import { useAudioQueue } from "@/hooks/useAudio";
 import { useRoomStore } from "@/stores/room-store";
 import { Board } from "./components/Board";
 import { MoneyLadder } from "./components/MoneyLadder";
@@ -18,6 +19,7 @@ export default function RoomDisplayPage() {
   const [error, setError] = useState<string | null>(null);
 
   useRoomGameState(socket);
+  useAudioQueue(socket);
   const state = useRoomStore();
 
   useEffect(() => {

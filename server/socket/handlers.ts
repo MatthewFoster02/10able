@@ -37,6 +37,7 @@ import {
 import { ANSWER_TIMEOUT_SECONDS } from "../../shared/constants";
 import { checkAnswerLocal } from "../services/questions";
 import { checkAnswerWithOpenAI } from "../services/openai";
+import { generateAnswerAudio, generateWrongAnswerAudio } from "../services/elevenlabs";
 
 type AppServer = Server<ClientToServerEvents, ServerToClientEvents, InterServerEvents, SocketData>;
 type AppSocket = Socket<ClientToServerEvents, ServerToClientEvents, InterServerEvents, SocketData>;
@@ -230,6 +231,10 @@ export function registerHandlers(io: AppServer): void {
           position: localResult.position,
           answerText: localResult.answerText,
         } as any);
+        // Generate and play audio for correct answer (fire-and-forget)
+        generateAnswerAudio(localResult.position, localResult.answerText).then((audio) => {
+          if (audio) io.to(room.code).emit("play_audio", { url: audio });
+        });
         return;
       }
 
@@ -257,8 +262,15 @@ export function registerHandlers(io: AppServer): void {
           position: aiResult.position,
           answerText: aiResult.answerText,
         } as any);
+        generateAnswerAudio(aiResult.position, aiResult.answerText).then((audio) => {
+          if (audio) io.to(room.code).emit("play_audio", { url: audio });
+        });
       } else {
         room.gameActor.send({ type: wrongType } as any);
+        // Generate audio for wrong answer
+        generateWrongAnswerAudio(answer).then((audio) => {
+          if (audio) io.to(room.code).emit("play_audio", { url: audio });
+        });
       }
     });
 
