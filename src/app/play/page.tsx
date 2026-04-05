@@ -25,7 +25,6 @@ export default function PlayerJoinPage() {
       (response) => {
         setJoining(false);
         if (response.ok) {
-          // Store player info for reconnection
           if (typeof window !== "undefined") {
             sessionStorage.setItem("playerId", response.playerId);
             sessionStorage.setItem("playerName", playerName.trim());
@@ -39,9 +38,9 @@ export default function PlayerJoinPage() {
   }
 
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center px-6">
-      <h1 className="mb-2 text-4xl font-bold text-amber-400">TENABLE</h1>
-      <p className="mb-8 text-slate-400">Join a game</p>
+    <div className="flex min-h-dvh flex-col items-center justify-center px-6">
+      <h1 className="mb-2 text-5xl font-black text-amber-400">TENABLE</h1>
+      <p className="mb-10 text-slate-400">Enter the room code to join</p>
 
       <form
         onSubmit={handleJoin}
@@ -49,12 +48,13 @@ export default function PlayerJoinPage() {
       >
         <input
           type="text"
-          placeholder="Room Code"
+          placeholder="ROOM CODE"
           value={roomCode}
           onChange={(e) => setRoomCode(e.target.value.toUpperCase())}
           maxLength={4}
-          className="rounded-lg border border-slate-700 bg-slate-900 px-5 py-4 text-center text-2xl font-bold uppercase tracking-[0.2em] text-white placeholder-slate-600 outline-none focus:border-amber-500"
+          className="rounded-xl border-2 border-slate-700 bg-slate-900 px-5 py-5 text-center text-3xl font-black uppercase tracking-[0.3em] text-white placeholder-slate-700 outline-none transition focus:border-amber-500"
           autoComplete="off"
+          inputMode="text"
         />
         <input
           type="text"
@@ -62,7 +62,7 @@ export default function PlayerJoinPage() {
           value={playerName}
           onChange={(e) => setPlayerName(e.target.value)}
           maxLength={20}
-          className="rounded-lg border border-slate-700 bg-slate-900 px-5 py-4 text-center text-lg text-white placeholder-slate-600 outline-none focus:border-amber-500"
+          className="rounded-xl border-2 border-slate-700 bg-slate-900 px-5 py-5 text-center text-xl text-white placeholder-slate-700 outline-none transition focus:border-amber-500"
           autoComplete="off"
         />
         <button
@@ -70,16 +70,20 @@ export default function PlayerJoinPage() {
           disabled={
             !connected || joining || !roomCode.trim() || !playerName.trim()
           }
-          className="rounded-lg bg-amber-500 py-4 text-lg font-bold text-slate-950 transition hover:bg-amber-400 disabled:opacity-50"
+          className="mt-2 rounded-xl bg-amber-500 py-5 text-xl font-bold text-slate-950 shadow-lg shadow-amber-500/20 transition hover:bg-amber-400 disabled:opacity-40 disabled:shadow-none"
         >
           {joining ? "Joining..." : "Join Game"}
         </button>
       </form>
 
       {!connected && (
-        <p className="mt-4 text-sm text-red-400">Connecting to server...</p>
+        <p className="mt-6 text-sm text-red-400 animate-pulse">
+          Connecting to server...
+        </p>
       )}
-      {error && <p className="mt-4 text-sm text-red-400">{error}</p>}
+      {error && (
+        <p className="mt-6 text-sm text-red-400 animate-shake">{error}</p>
+      )}
     </div>
   );
 }
