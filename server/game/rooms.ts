@@ -210,9 +210,17 @@ function mapStateToPhase(state: string): GamePhase {
     playerTurn: "individual_round",
     answerReveal: "individual_round",
     answerResult: "individual_round",
+    nominateWaiting: "individual_round",
+    nominateResponse: "individual_round",
+    overruleWindow: "individual_round",
+    overruleInput: "individual_round",
+    overruleResult: "individual_round",
     captainRound: "captain_round",
     captainAnswerReveal: "captain_round",
     captainAnswerResult: "captain_round",
+    captainNominateWaiting: "captain_round",
+    captainNominateResponse: "captain_round",
+    reinstatementOffer: "captain_round",
     roundEnd: "round_end",
     gameOver: "game_over",
   };
@@ -316,20 +324,40 @@ export function buildPlayerStateFromGame(room: Room, playerId: string): PlayerSt
   const isCaptain = player?.isCaptain ?? false;
 
   const isPlayerTurnState = ["playerTurn", "captainRound"].includes(state);
+  const isNominateState = ["nominateWaiting", "nominateResponse", "captainNominateWaiting", "captainNominateResponse"].includes(state);
 
   const timerSeconds = ctx.timerDeadline
     ? Math.max(0, Math.ceil((ctx.timerDeadline - Date.now()) / 1000))
     : null;
 
-  // Available players for captain picking
+  // Available players for captain picking or nominating
   const availablePlayers =
     state === "captainPicking"
       ? ctx.players
-          .filter(
-            (p) => !p.isCaptain && !ctx.playOrder.includes(p.id) && p.status !== "eliminated"
-          )
+          .filter((p) => !p.isCaptain && !ctx.playOrder.includes(p.id) && p.status !== "eliminated")
           .map((p) => ({ id: p.id, name: p.name }))
-      : [];
+      : isMyTurn && isPlayerTurnState
+        ? ctx.players
+            .filter((p) => p.id !== playerId && p.status !== "eliminated" && p.status !== "eliminated_final")
+            .map((p) => ({ id: p.id, name: p.name }))
+        : [];
+
+  const eliminatedPlayers = state === "reinstatementOffer" && isCaptain
+    ? ctx.players
+        .filter((p) => p.status === "eliminated" && !ctx.reinstatedPlayerIds.includes(p.id))
+        .map((p) => ({ id: p.id, name: p.name }))
+    : [];
+
+  // Nominate/overrule availability
+  const canNominate = isMyTurn && isPlayerTurnState &&
+    ctx.nominatesRemaining > 0 && ctx.correctCount < 5;
+  const canOverrule = isCaptain && !isMyTurn &&
+    !ctx.overruleUsedThisRound && ctx.correctCount < 5 &&
+    ctx.currentRound !== ctx.totalRounds;
+  const canReinstate = isCaptain && state === "reinstatementOffer";
+
+  // Is the nominated player this player?
+  const isNominated = ctx.nominateTargetId === playerId && isNominateState;
 
   return {
     phase,
@@ -347,22 +375,22 @@ export function buildPlayerStateFromGame(room: Room, playerId: string): PlayerSt
     correctCount: isMyTurn ? ctx.correctCount : 0,
     moneyLevel: isMyTurn ? (ctx.moneyLadder[ctx.correctCount] ?? 0) : 0,
     hasLife: isMyTurn ? ctx.activePlayerHasLife : false,
-    canSubmitAnswer: isMyTurn && isPlayerTurnState,
+    canSubmitAnswer: (isMyTurn && isPlayerTurnState) || isNominated,
     canBank: isMyTurn && isPlayerTurnState && ctx.correctCount >= 5,
-    canNominate: false, // Phase 4
-    canOverrule: false, // Phase 4
+    canNominate,
+    canOverrule,
     canStartGame: false,
     canPickPlayer: isCaptain && state === "captainPicking",
-    canReinstate: false, // Phase 4
+    canReinstate,
     availablePlayers,
-    eliminatedPlayers: [],
-    nominateSuggestion: null,
-    overrulePlayerAnswer: null,
+    eliminatedPlayers,
+    nominateSuggestion: isMyTurn ? ctx.nominateSuggestion : null,
+    overrulePlayerAnswer: isCaptain && state === "overruleWindow" ? ctx.pendingAnswer : null,
     prizePot: ctx.prizePot,
     players: ctx.players,
     timerSeconds,
     finalVoteOptions: null,
     hasVoted: false,
-    message: null,
+    message: isNominated ? "You've been nominated! Submit a suggestion." : null,
   };
 }

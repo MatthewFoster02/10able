@@ -14,6 +14,10 @@ import {
   subscribeRoomSchema,
   captainPickPlayerSchema,
   submitAnswerSchema,
+  useNominateSchema,
+  nominateSuggestionSchema,
+  useOverruleSchema,
+  reinstatePlayerSchema,
 } from "../../shared/validation";
 import {
   createRoom,
@@ -263,6 +267,189 @@ export function registerHandlers(io: AppServer): void {
 
       console.log(`[Room ${room.code}] Player banking money`);
       room.gameActor.send({ type: "BANK" });
+    });
+
+    // ── Nominate ─────────────────────────────────────────────
+    socket.on("use_nominate", (data) => {
+      const room = getPlayerRoom(socket);
+      if (!room?.gameActor) return;
+
+      const parsed = useNominateSchema.safeParse(data);
+      if (!parsed.success) return;
+
+      const ctx = getGameContext(room);
+      if (!ctx || ctx.activePlayerId !== socket.data.playerId) return;
+
+      console.log(`[Room ${room.code}] Nominate: ${parsed.data.targetPlayerId}`);
+      room.gameActor.send({ type: "USE_NOMINATE", targetPlayerId: parsed.data.targetPlayerId });
+
+      // Notify the nominated player
+      const targetSocketId = room.playerSockets.get(parsed.data.targetPlayerId);
+      if (targetSocketId) {
+        io.to(targetSocketId).emit("nominate_request");
+      }
+    });
+
+    socket.on("nominate_suggestion", (data) => {
+      const room = getPlayerRoom(socket);
+      if (!room?.gameActor) return;
+
+      const parsed = nominateSuggestionSchema.safeParse(data);
+      if (!parsed.success) return;
+
+      const ctx = getGameContext(room);
+      if (!ctx || ctx.nominateTargetId !== socket.data.playerId) return;
+
+      console.log(`[Room ${room.code}] Nominate suggestion: "${parsed.data.answer}"`);
+      room.gameActor.send({ type: "NOMINATE_SUGGESTION", answer: parsed.data.answer });
+
+      // Send suggestion to active player
+      const activeSocketId = room.playerSockets.get(ctx.activePlayerId!);
+      if (activeSocketId) {
+        io.to(activeSocketId).emit("player_state", {
+          ...buildPlayerStateFromGame(room, ctx.activePlayerId!),
+          nominateSuggestion: parsed.data.answer,
+        });
+      }
+    });
+
+    socket.on("accept_nominate", async () => {
+      const room = getPlayerRoom(socket);
+      if (!room?.gameActor) return;
+
+      const ctx = getGameContext(room);
+      if (!ctx || ctx.activePlayerId !== socket.data.playerId) return;
+      if (!ctx.nominateSuggestion || !ctx.currentQuestion) return;
+
+      // Submit the nominated answer through normal validation
+      room.gameActor.send({ type: "ACCEPT_NOMINATE" });
+
+      // Now validate and submit the suggestion as a regular answer
+      const answer = ctx.nominateSuggestion;
+      const localResult = checkAnswerLocal(answer, ctx.currentQuestion.answers, ctx.revealedPositions);
+
+      if (localResult.match) {
+        room.gameActor.send({ type: "VALIDATED_CORRECT", position: localResult.position, answerText: localResult.answerText });
+        return;
+      }
+      if (localResult.alreadyFound) {
+        room.gameActor.send({ type: "VALIDATED_ALREADY_FOUND" });
+        return;
+      }
+
+      const remainingAnswers = ctx.currentQuestion.answers.filter((a) => !ctx.revealedPositions.has(a.position));
+      const aiResult = await checkAnswerWithOpenAI(answer, ctx.currentQuestion.category, ctx.currentQuestion.question, remainingAnswers, ctx.currentQuestion.id);
+
+      if (aiResult.match && aiResult.position !== null && aiResult.answerText) {
+        room.gameActor.send({ type: "VALIDATED_CORRECT", position: aiResult.position, answerText: aiResult.answerText });
+      } else {
+        room.gameActor.send({ type: "VALIDATED_WRONG" });
+      }
+    });
+
+    socket.on("reject_nominate", () => {
+      const room = getPlayerRoom(socket);
+      if (!room?.gameActor) return;
+
+      const ctx = getGameContext(room);
+      if (!ctx || ctx.activePlayerId !== socket.data.playerId) return;
+
+      room.gameActor.send({ type: "REJECT_NOMINATE" });
+    });
+
+    // ── Overrule ────────────────────────────────────────────
+    socket.on("use_overrule", async (data) => {
+      const room = getPlayerRoom(socket);
+      if (!room?.gameActor) return;
+
+      const parsed = useOverruleSchema.safeParse(data);
+      if (!parsed.success) return;
+
+      const player = room.players.find((p) => p.id === socket.data.playerId);
+      if (!player?.isCaptain) return;
+
+      const ctx = getGameContext(room);
+      if (!ctx || !ctx.currentQuestion) return;
+
+      console.log(`[Room ${room.code}] Overrule with: "${parsed.data.replacementAnswer}"`);
+
+      // First check the original pending answer
+      const originalAnswer = ctx.pendingAnswer;
+      let originalWasCorrect = false;
+      let originalPosition: number | null = null;
+      let originalAnswerText: string | null = null;
+
+      if (originalAnswer) {
+        const origResult = checkAnswerLocal(originalAnswer, ctx.currentQuestion.answers, ctx.revealedPositions);
+        if (origResult.match) {
+          originalWasCorrect = true;
+          originalPosition = origResult.position;
+          originalAnswerText = origResult.answerText;
+        }
+      }
+
+      // Now validate captain's replacement answer
+      const captainAnswer = parsed.data.replacementAnswer;
+      const localResult = checkAnswerLocal(captainAnswer, ctx.currentQuestion.answers, ctx.revealedPositions);
+
+      if (localResult.match) {
+        room.gameActor.send({
+          type: "OVERRULE_VALIDATED_CORRECT",
+          position: localResult.position,
+          answerText: localResult.answerText,
+          originalWasCorrect,
+          originalPosition,
+          originalAnswerText,
+        });
+        return;
+      }
+
+      // Try Tier 2
+      const remainingAnswers = ctx.currentQuestion.answers.filter((a) => !ctx.revealedPositions.has(a.position));
+      const aiResult = await checkAnswerWithOpenAI(captainAnswer, ctx.currentQuestion.category, ctx.currentQuestion.question, remainingAnswers, ctx.currentQuestion.id);
+
+      if (aiResult.match && aiResult.position !== null && aiResult.answerText) {
+        room.gameActor.send({
+          type: "OVERRULE_VALIDATED_CORRECT",
+          position: aiResult.position,
+          answerText: aiResult.answerText,
+          originalWasCorrect,
+          originalPosition,
+          originalAnswerText,
+        });
+      } else {
+        room.gameActor.send({
+          type: "OVERRULE_VALIDATED_WRONG",
+          originalWasCorrect,
+          originalPosition,
+          originalAnswerText,
+        });
+      }
+    });
+
+    // ── Reinstatement ───────────────────────────────────────
+    socket.on("reinstate_player", (data) => {
+      const room = getPlayerRoom(socket);
+      if (!room?.gameActor) return;
+
+      const parsed = reinstatePlayerSchema.safeParse(data);
+      if (!parsed.success) return;
+
+      const player = room.players.find((p) => p.id === socket.data.playerId);
+      if (!player?.isCaptain) return;
+
+      console.log(`[Room ${room.code}] Reinstating player: ${parsed.data.playerId}`);
+      room.gameActor.send({ type: "REINSTATE_PLAYER", playerId: parsed.data.playerId });
+    });
+
+    socket.on("continue_without_reinstate", () => {
+      const room = getPlayerRoom(socket);
+      if (!room?.gameActor) return;
+
+      const player = room.players.find((p) => p.id === socket.data.playerId);
+      if (!player?.isCaptain) return;
+
+      room.gameActor.send({ type: "CONTINUE_WITHOUT_REINSTATE" });
     });
 
     // ── Continue from round end ───────────────────────────────

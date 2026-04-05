@@ -2,7 +2,7 @@
 // XState v5 game state machine — the heart of the game logic
 // ============================================================
 
-import { setup, assign, fromCallback, type ActorRefFrom } from "xstate";
+import { setup, assign, type ActorRefFrom } from "xstate";
 import type { QuestionData, Player, BoardSlot, RoundResult } from "../../shared/types";
 import {
   MONEY_LADDER,
@@ -10,8 +10,9 @@ import {
   MIN_CORRECT_TO_BANK,
   NOMINATES_PER_GAME,
   ANSWERS_PER_LIST,
+  OVERRULE_WINDOW_SECONDS,
 } from "../../shared/constants";
-import { getRandomQuestion, checkAnswerLocal } from "../services/questions";
+import { getRandomQuestion } from "../services/questions";
 
 // ── Context ──────────────────────────────────────────────────
 
@@ -41,14 +42,25 @@ export interface GameContext {
   nominatesRemaining: number;
   overruleUsedThisRound: boolean;
 
+  // Nominate state
+  nominateTargetId: string | null;
+  nominateSuggestion: string | null;
+
+  // Overrule state
+  pendingAnswer: string | null;
+  overruleActive: boolean;
+
+  // Reinstatement
+  reinstatedPlayerIds: string[];
+
   // Round history
   roundHistory: RoundResult[];
 
   // Timer
   timerDeadline: number | null;
 
-  // Round order: which non-captain players have been picked
-  playOrder: string[]; // playerIds in order they were picked
+  // Round order
+  playOrder: string[];
 }
 
 // ── Events ───────────────────────────────────────────────────
@@ -56,22 +68,31 @@ export interface GameContext {
 export type GameEvent =
   | { type: "START_GAME" }
   | { type: "CAPTAIN_PICK"; playerId: string }
-  | { type: "SUBMIT_ANSWER"; answer: string }
   | { type: "BANK" }
   | { type: "TIMER_EXPIRED" }
   | { type: "CONTINUE_REVEAL" }
-  | { type: "REVEAL_COMPLETE" }
   | { type: "VALIDATED_CORRECT"; position: number; answerText: string }
   | { type: "VALIDATED_WRONG" }
-  | { type: "VALIDATED_ALREADY_FOUND" };
+  | { type: "VALIDATED_ALREADY_FOUND" }
+  // Nominate
+  | { type: "USE_NOMINATE"; targetPlayerId: string }
+  | { type: "NOMINATE_SUGGESTION"; answer: string }
+  | { type: "ACCEPT_NOMINATE" }
+  | { type: "REJECT_NOMINATE" }
+  // Overrule
+  | { type: "USE_OVERRULE" }
+  | { type: "OVERRULE_VALIDATED_CORRECT"; position: number; answerText: string; originalWasCorrect: boolean; originalPosition: number | null; originalAnswerText: string | null }
+  | { type: "OVERRULE_VALIDATED_WRONG"; originalWasCorrect: boolean; originalPosition: number | null; originalAnswerText: string | null }
+  | { type: "SKIP_OVERRULE" }
+  // Reinstatement
+  | { type: "REINSTATE_PLAYER"; playerId: string }
+  | { type: "CONTINUE_WITHOUT_REINSTATE" };
 
 // ── Helper functions ─────────────────────────────────────────
 
 function buildMoneyLadder(reinstatements: number): number[] {
-  // Each reinstatement removes the highest remaining tier
   const ladder = [...MONEY_LADDER];
   for (let i = 0; i < reinstatements; i++) {
-    // Find the highest non-zero value and set it to the value below
     for (let j = ladder.length - 1; j >= 0; j--) {
       if (ladder[j] > 0) {
         ladder[j] = j > 0 ? ladder[j - 1] : 0;
@@ -116,18 +137,16 @@ export const gameMachine = setup({
     input: {} as { roomCode: string; players: Player[] },
   },
   actions: {
-    initGame: assign(({ context }) => {
-      const totalRounds = context.players.length;
-      return {
-        totalRounds,
-        currentRound: 1,
-        nominatesRemaining: NOMINATES_PER_GAME,
-        prizePot: 0,
-        roundHistory: [],
-        playOrder: [],
-        usedQuestionIds: [],
-      };
-    }),
+    initGame: assign(({ context }) => ({
+      totalRounds: context.players.length,
+      currentRound: 1,
+      nominatesRemaining: NOMINATES_PER_GAME,
+      prizePot: 0,
+      roundHistory: [],
+      playOrder: [],
+      usedQuestionIds: [],
+      reinstatedPlayerIds: [],
+    })),
 
     setupRound: assign(({ context }) => {
       const question = getRandomQuestion(context.usedQuestionIds);
@@ -144,18 +163,21 @@ export const gameMachine = setup({
         reinstatementCount: 0,
         timerDeadline: null,
         activePlayerId: null,
+        nominateTargetId: null,
+        nominateSuggestion: null,
+        pendingAnswer: null,
+        overruleActive: false,
+        reinstatedPlayerIds: [],
         usedQuestionIds: [...context.usedQuestionIds, question.id],
       };
     }),
 
     assignPlayer: assign(({ context, event }) => {
       if (event.type !== "CAPTAIN_PICK") return {};
-
       const playerId = event.playerId;
       const players = context.players.map((p) =>
         p.id === playerId ? { ...p, status: "active" as const, roundPlayed: context.currentRound } : p
       );
-
       return {
         activePlayerId: playerId,
         players,
@@ -167,99 +189,26 @@ export const gameMachine = setup({
     assignCaptain: assign(({ context }) => {
       const captain = getCaptain(context.players);
       if (!captain) throw new Error("No captain found");
-
       const players = context.players.map((p) =>
         p.id === captain.id ? { ...p, status: "active" as const, roundPlayed: context.currentRound } : p
       );
-
       return {
         activePlayerId: captain.id,
         players,
-        timerDeadline: Date.now() + ANSWER_TIMEOUT_SECONDS * 1000,
-      };
-    }),
-
-    processAnswer: assign(({ context, event }) => {
-      if (event.type !== "SUBMIT_ANSWER" || !context.currentQuestion) return {};
-
-      const result = checkAnswerLocal(
-        event.answer,
-        context.currentQuestion.answers,
-        context.revealedPositions
-      );
-
-      if (!result.match) {
-        if (result.alreadyFound) {
-          // Already found — no penalty, reset timer
-          return {
-            timerDeadline: Date.now() + ANSWER_TIMEOUT_SECONDS * 1000,
-          };
-        }
-
-        // Wrong answer
-        if (context.activePlayerHasLife) {
-          // Life absorbs the wrong answer
-          return {
-            activePlayerHasLife: false,
-            timerDeadline: Date.now() + ANSWER_TIMEOUT_SECONDS * 1000,
-          };
-        }
-
-        // No life — elimination
-        const players = context.players.map((p) =>
-          p.id === context.activePlayerId
-            ? { ...p, status: "eliminated" as const }
-            : p
-        );
-
-        return {
-          players,
-          timerDeadline: null,
-        };
-      }
-
-      // Correct answer
-      const newRevealed = new Set(context.revealedPositions);
-      newRevealed.add(result.position);
-
-      const newBoard = context.board.map((slot) =>
-        slot.position === result.position
-          ? {
-              ...slot,
-              answer: result.answerText,
-              revealed: true,
-              revealedByPlayer: context.activePlayerId,
-            }
-          : slot
-      );
-
-      const newCorrectCount = context.correctCount + 1;
-
-      return {
-        board: newBoard,
-        revealedPositions: newRevealed,
-        correctCount: newCorrectCount,
+        reinstatedPlayerIds: [],
         timerDeadline: Date.now() + ANSWER_TIMEOUT_SECONDS * 1000,
       };
     }),
 
     processValidatedCorrect: assign(({ context, event }) => {
       if (event.type !== "VALIDATED_CORRECT") return {};
-
       const newRevealed = new Set(context.revealedPositions);
       newRevealed.add(event.position);
-
       const newBoard = context.board.map((slot) =>
         slot.position === event.position
-          ? {
-              ...slot,
-              answer: event.answerText,
-              revealed: true,
-              revealedByPlayer: context.activePlayerId,
-            }
+          ? { ...slot, answer: event.answerText, revealed: true, revealedByPlayer: context.activePlayerId }
           : slot
       );
-
       return {
         board: newBoard,
         revealedPositions: newRevealed,
@@ -275,50 +224,54 @@ export const gameMachine = setup({
           timerDeadline: Date.now() + ANSWER_TIMEOUT_SECONDS * 1000,
         };
       }
-
-      // No life — elimination
+      // Captain is never eliminated in individual rounds
+      const isCaptainRound = context.currentRound === context.totalRounds;
+      if (isCaptainRound) {
+        // Captain loses life but isn't eliminated — round just ends
+        return {
+          timerDeadline: null,
+        };
+      }
       const players = context.players.map((p) =>
-        p.id === context.activePlayerId
-          ? { ...p, status: "eliminated" as const }
-          : p
+        p.id === context.activePlayerId ? { ...p, status: "eliminated" as const } : p
       );
       return { players, timerDeadline: null };
     }),
 
-    processValidatedAlreadyFound: assign(({ context }) => ({
+    processValidatedAlreadyFound: assign(() => ({
       timerDeadline: Date.now() + ANSWER_TIMEOUT_SECONDS * 1000,
     })),
 
     handleTimerExpired: assign(({ context }) => {
-      // Timer expiry = wrong answer
       if (context.activePlayerHasLife) {
         return {
           activePlayerHasLife: false,
           timerDeadline: Date.now() + ANSWER_TIMEOUT_SECONDS * 1000,
         };
       }
-
-      // No life — elimination
+      const isCaptainRound = context.currentRound === context.totalRounds;
+      if (isCaptainRound) {
+        return { timerDeadline: null };
+      }
       const players = context.players.map((p) =>
-        p.id === context.activePlayerId
-          ? { ...p, status: "eliminated" as const }
-          : p
+        p.id === context.activePlayerId ? { ...p, status: "eliminated" as const } : p
       );
-
-      return {
-        players,
-        timerDeadline: null,
-      };
+      return { players, timerDeadline: null };
     }),
 
     bankMoney: assign(({ context }) => {
       const amount = getMoneyForCorrectCount(context.moneyLadder, context.correctCount);
-      const players = context.players.map((p) =>
-        p.id === context.activePlayerId
-          ? { ...p, status: "qualified" as const }
-          : p
-      );
-
+      // Confirm any reinstatements
+      const players = context.players.map((p) => {
+        if (p.id === context.activePlayerId) {
+          return { ...p, status: "qualified" as const };
+        }
+        // Reinstated players become qualified
+        if (context.reinstatedPlayerIds.includes(p.id)) {
+          return { ...p, status: "reinstated" as const };
+        }
+        return p;
+      });
       return {
         prizePot: context.prizePot + amount,
         players,
@@ -338,74 +291,173 @@ export const gameMachine = setup({
       };
     }),
 
-    recordElimination: assign(({ context }) => ({
-      roundHistory: [
-        ...context.roundHistory,
-        {
-          roundNumber: context.currentRound,
-          playerId: context.activePlayerId!,
-          playerName:
-            context.players.find((p) => p.id === context.activePlayerId)?.name ?? "",
-          correctCount: context.correctCount,
-          moneyBanked: 0,
-          eliminated: true,
-          listId: context.currentQuestion?.id ?? "",
-        },
-      ],
-      timerDeadline: null,
-    })),
+    recordElimination: assign(({ context }) => {
+      // If captain's round, void reinstatements
+      const isCaptainRound = context.currentRound === context.totalRounds;
+      let players = context.players;
+      if (isCaptainRound && context.reinstatedPlayerIds.length > 0) {
+        players = players.map((p) =>
+          context.reinstatedPlayerIds.includes(p.id)
+            ? { ...p, status: "eliminated" as const }
+            : p
+        );
+      }
+      return {
+        players,
+        roundHistory: [
+          ...context.roundHistory,
+          {
+            roundNumber: context.currentRound,
+            playerId: context.activePlayerId!,
+            playerName: context.players.find((p) => p.id === context.activePlayerId)?.name ?? "",
+            correctCount: context.correctCount,
+            moneyBanked: 0,
+            eliminated: true,
+            listId: context.currentQuestion?.id ?? "",
+          },
+        ],
+        timerDeadline: null,
+      };
+    }),
 
     advanceRound: assign(({ context }) => ({
       currentRound: context.currentRound + 1,
     })),
+
+    // ── Nominate actions ────────────────────────────────────
+    startNominate: assign(({ context, event }) => {
+      if (event.type !== "USE_NOMINATE") return {};
+      return {
+        nominateTargetId: event.targetPlayerId,
+        nominateSuggestion: null,
+        nominatesRemaining: context.nominatesRemaining - 1,
+      };
+    }),
+
+    receiveNominateSuggestion: assign(({ context, event }) => {
+      if (event.type !== "NOMINATE_SUGGESTION") return {};
+      return { nominateSuggestion: event.answer };
+    }),
+
+    clearNominate: assign(() => ({
+      nominateTargetId: null,
+      nominateSuggestion: null,
+    })),
+
+    // ── Overrule actions ────────────────────────────────────
+    processOverruleResult: assign(({ context, event }) => {
+      if (event.type !== "OVERRULE_VALIDATED_CORRECT" && event.type !== "OVERRULE_VALIDATED_WRONG") return {};
+
+      const updates: Partial<GameContext> = {
+        overruleUsedThisRound: true,
+        overruleActive: false,
+        pendingAnswer: null,
+      };
+
+      if (event.originalWasCorrect && event.originalPosition !== null && event.originalAnswerText) {
+        // Original was correct — show ghosted on board, no credit
+        updates.board = context.board.map((slot) =>
+          slot.position === event.originalPosition
+            ? { ...slot, answer: event.originalAnswerText!, revealed: true, ghosted: true, revealedByPlayer: null }
+            : slot
+        );
+        const newRevealed = new Set(context.revealedPositions);
+        newRevealed.add(event.originalPosition);
+        updates.revealedPositions = newRevealed;
+        // Don't increment correctCount — no credit given
+      }
+
+      if (event.type === "OVERRULE_VALIDATED_CORRECT") {
+        // Captain's answer is correct
+        const newRevealed = new Set(updates.revealedPositions ?? context.revealedPositions);
+        newRevealed.add(event.position);
+        updates.revealedPositions = newRevealed;
+        updates.board = (updates.board ?? context.board).map((slot) =>
+          slot.position === event.position
+            ? { ...slot, answer: event.answerText, revealed: true, revealedByPlayer: context.activePlayerId, ghosted: false }
+            : slot
+        );
+        updates.correctCount = context.correctCount + 1;
+        updates.timerDeadline = Date.now() + ANSWER_TIMEOUT_SECONDS * 1000;
+      } else {
+        // Captain's answer is also wrong — costs the player
+        if (context.activePlayerHasLife) {
+          updates.activePlayerHasLife = false;
+          updates.timerDeadline = Date.now() + ANSWER_TIMEOUT_SECONDS * 1000;
+        } else {
+          updates.players = context.players.map((p) =>
+            p.id === context.activePlayerId ? { ...p, status: "eliminated" as const } : p
+          );
+          updates.timerDeadline = null;
+        }
+      }
+
+      return updates;
+    }),
+
+    markOverruleUsed: assign(() => ({
+      overruleUsedThisRound: true,
+      overruleActive: false,
+      pendingAnswer: null,
+    })),
+
+    // ── Reinstatement actions ───────────────────────────────
+    reinstatePlayer: assign(({ context, event }) => {
+      if (event.type !== "REINSTATE_PLAYER") return {};
+      const newReinstatementCount = context.reinstatementCount + 1;
+      return {
+        reinstatedPlayerIds: [...context.reinstatedPlayerIds, event.playerId],
+        players: context.players.map((p) =>
+          p.id === event.playerId ? { ...p, status: "reinstated" as const } : p
+        ),
+        reinstatementCount: newReinstatementCount,
+        moneyLadder: buildMoneyLadder(newReinstatementCount),
+        timerDeadline: Date.now() + ANSWER_TIMEOUT_SECONDS * 1000,
+      };
+    }),
+
+    continueWithoutReinstate: assign(() => ({
+      timerDeadline: Date.now() + ANSWER_TIMEOUT_SECONDS * 1000,
+    })),
   },
 
   guards: {
-    isCorrectAnswer: ({ context, event }) => {
-      if (event.type !== "SUBMIT_ANSWER" || !context.currentQuestion) return false;
-      const result = checkAnswerLocal(
-        event.answer,
-        context.currentQuestion.answers,
-        context.revealedPositions
-      );
-      return result.match;
-    },
-
-    isAlreadyFound: ({ context, event }) => {
-      if (event.type !== "SUBMIT_ANSWER" || !context.currentQuestion) return false;
-      const result = checkAnswerLocal(
-        event.answer,
-        context.currentQuestion.answers,
-        context.revealedPositions
-      );
-      return !result.match && "alreadyFound" in result && result.alreadyFound;
-    },
-
     hasLife: ({ context }) => context.activePlayerHasLife,
-
     canBank: ({ context }) => context.correctCount >= MIN_CORRECT_TO_BANK,
-
     allAnswersFound: ({ context }) => context.correctCount >= ANSWERS_PER_LIST,
-
     isPlayerEliminated: ({ context }) => {
       const player = context.players.find((p) => p.id === context.activePlayerId);
       return player?.status === "eliminated";
     },
-
     isCaptainRound: ({ context }) => context.currentRound === context.totalRounds,
-
+    isCaptainRoundAndNotEliminated: ({ context }) => {
+      // Captain is never truly eliminated in their round — round just ends
+      const isCaptainRound = context.currentRound === context.totalRounds;
+      if (!isCaptainRound) return false;
+      return !context.activePlayerHasLife; // second wrong answer ends captain round
+    },
     hasMoreRounds: ({ context }) => context.currentRound < context.totalRounds,
-
     validPickTarget: ({ context, event }) => {
       if (event.type !== "CAPTAIN_PICK") return false;
       const available = getNextUnplayedNonCaptain(context.players, context.playOrder);
       return available.some((p) => p.id === event.playerId);
     },
-
-    onlyOnePlayerLeft: ({ context }) => {
-      const available = getNextUnplayedNonCaptain(context.players, context.playOrder);
-      return available.length === 1;
+    canNominate: ({ context }) =>
+      context.nominatesRemaining > 0 && context.correctCount < MIN_CORRECT_TO_BANK,
+    canOverrule: ({ context }) =>
+      !context.overruleUsedThisRound &&
+      context.correctCount < MIN_CORRECT_TO_BANK &&
+      context.currentRound !== context.totalRounds, // not in captain's round
+    canReinstate: ({ context }) => {
+      if (context.currentRound !== context.totalRounds) return false;
+      if (context.correctCount < MIN_CORRECT_TO_BANK) return false;
+      const eliminated = context.players.filter(
+        (p) => p.status === "eliminated" && !context.reinstatedPlayerIds.includes(p.id)
+      );
+      return eliminated.length > 0;
     },
+    isOverruleCorrect: ({ event }) =>
+      event.type === "OVERRULE_VALIDATED_CORRECT",
   },
 }).createMachine({
   id: "tenable",
@@ -427,6 +479,11 @@ export const gameMachine = setup({
     reinstatementCount: 0,
     nominatesRemaining: NOMINATES_PER_GAME,
     overruleUsedThisRound: false,
+    nominateTargetId: null,
+    nominateSuggestion: null,
+    pendingAnswer: null,
+    overruleActive: false,
+    reinstatedPlayerIds: [],
     roundHistory: [],
     timerDeadline: null,
     playOrder: [],
@@ -443,22 +500,15 @@ export const gameMachine = setup({
     },
 
     roundIntro: {
-      // Show category and question, then transition based on round type
       after: {
         3000: [
-          {
-            target: "captainRound",
-            guard: "isCaptainRound",
-          },
-          {
-            target: "captainPicking",
-          },
+          { target: "captainRound", guard: "isCaptainRound" },
+          { target: "captainPicking" },
         ],
       },
     },
 
     captainPicking: {
-      // Captain chooses which player tackles this round
       on: {
         CAPTAIN_PICK: {
           target: "playerTurn",
@@ -468,8 +518,9 @@ export const gameMachine = setup({
       },
     },
 
+    // ── Individual round states ─────────────────────────────
+
     playerTurn: {
-      // Active player is answering
       on: {
         VALIDATED_ALREADY_FOUND: {
           target: "playerTurn",
@@ -493,40 +544,111 @@ export const gameMachine = setup({
           target: "answerResult",
           actions: ["handleTimerExpired"],
         },
+        USE_NOMINATE: {
+          guard: "canNominate",
+          target: "nominateWaiting",
+          actions: ["startNominate"],
+        },
       },
     },
 
     answerReveal: {
-      // Brief pause to show the correct answer on the board
       always: [
-        {
-          target: "roundEnd",
-          guard: "allAnswersFound",
-          actions: ["bankMoney"],
-        },
-        {
-          target: "playerTurn",
-        },
+        { target: "roundEnd", guard: "allAnswersFound", actions: ["bankMoney"] },
+        { target: "playerTurn" },
       ],
     },
 
     answerResult: {
-      // After a wrong answer — check elimination
       always: [
-        {
-          target: "roundEnd",
-          guard: "isPlayerEliminated",
-          actions: ["recordElimination"],
-        },
-        {
-          // Had life, continue
-          target: "playerTurn",
-        },
+        { target: "roundEnd", guard: "isPlayerEliminated", actions: ["recordElimination"] },
+        { target: "playerTurn" },
       ],
     },
 
+    // ── Nominate states ─────────────────────────────────────
+
+    nominateWaiting: {
+      // Waiting for nominated player to submit suggestion
+      on: {
+        NOMINATE_SUGGESTION: {
+          target: "nominateResponse",
+          actions: ["receiveNominateSuggestion"],
+        },
+        TIMER_EXPIRED: {
+          target: "playerTurn",
+          actions: ["clearNominate"],
+        },
+      },
+    },
+
+    nominateResponse: {
+      // Active player accepts or rejects the suggestion
+      on: {
+        ACCEPT_NOMINATE: {
+          // The suggestion will be submitted as a regular answer by the handler
+          target: "playerTurn",
+          actions: ["clearNominate"],
+        },
+        REJECT_NOMINATE: {
+          target: "playerTurn",
+          actions: ["clearNominate"],
+        },
+        TIMER_EXPIRED: {
+          target: "playerTurn",
+          actions: ["clearNominate"],
+        },
+      },
+    },
+
+    // ── Overrule states ─────────────────────────────────────
+
+    overruleWindow: {
+      // Brief window for captain to overrule (entered from handler, not machine)
+      // The handler will send USE_OVERRULE or SKIP_OVERRULE
+      on: {
+        USE_OVERRULE: {
+          target: "overruleInput",
+        },
+        SKIP_OVERRULE: [
+          // Original answer was wrong, process it
+          { target: "answerResult", actions: ["processValidatedWrong"] },
+        ],
+        TIMER_EXPIRED: [
+          { target: "answerResult", actions: ["processValidatedWrong"] },
+        ],
+      },
+    },
+
+    overruleInput: {
+      // Captain entering replacement answer
+      on: {
+        OVERRULE_VALIDATED_CORRECT: {
+          target: "overruleResult",
+          actions: ["processOverruleResult"],
+        },
+        OVERRULE_VALIDATED_WRONG: {
+          target: "overruleResult",
+          actions: ["processOverruleResult"],
+        },
+        TIMER_EXPIRED: {
+          target: "playerTurn",
+          actions: ["markOverruleUsed"],
+        },
+      },
+    },
+
+    overruleResult: {
+      always: [
+        { target: "roundEnd", guard: "allAnswersFound", actions: ["bankMoney"] },
+        { target: "roundEnd", guard: "isPlayerEliminated", actions: ["recordElimination"] },
+        { target: "playerTurn" },
+      ],
+    },
+
+    // ── Captain round states ────────────────────────────────
+
     captainRound: {
-      // Captain's turn — same mechanics but no overrule
       entry: ["assignCaptain"],
       on: {
         VALIDATED_ALREADY_FOUND: {
@@ -534,10 +656,13 @@ export const gameMachine = setup({
           actions: ["processValidatedAlreadyFound"],
           reenter: true,
         },
-        VALIDATED_CORRECT: {
-          target: "captainAnswerReveal",
-          actions: ["processValidatedCorrect"],
-        },
+        VALIDATED_CORRECT: [
+          {
+            // All found -> bank
+            target: "captainAnswerReveal",
+            actions: ["processValidatedCorrect"],
+          },
+        ],
         VALIDATED_WRONG: {
           target: "captainAnswerResult",
           actions: ["processValidatedWrong"],
@@ -551,47 +676,87 @@ export const gameMachine = setup({
           target: "captainAnswerResult",
           actions: ["handleTimerExpired"],
         },
+        USE_NOMINATE: {
+          guard: "canNominate",
+          target: "captainNominateWaiting",
+          actions: ["startNominate"],
+        },
       },
     },
 
     captainAnswerReveal: {
       always: [
-        {
-          target: "roundEnd",
-          guard: "allAnswersFound",
-          actions: ["bankMoney"],
-        },
-        {
-          target: "captainRound",
-        },
+        { target: "roundEnd", guard: "allAnswersFound", actions: ["bankMoney"] },
+        // Check if reinstatement is available
+        { target: "reinstatementOffer", guard: "canReinstate" },
+        { target: "captainRound" },
       ],
     },
 
     captainAnswerResult: {
       always: [
+        // Captain isn't eliminated, but second wrong = round ends
         {
           target: "roundEnd",
-          guard: "isPlayerEliminated",
+          guard: ({ context }) => !context.activePlayerHasLife,
           actions: ["recordElimination"],
         },
-        {
-          target: "captainRound",
-        },
+        { target: "captainRound" },
       ],
     },
 
+    captainNominateWaiting: {
+      on: {
+        NOMINATE_SUGGESTION: {
+          target: "captainNominateResponse",
+          actions: ["receiveNominateSuggestion"],
+        },
+        TIMER_EXPIRED: {
+          target: "captainRound",
+          actions: ["clearNominate"],
+        },
+      },
+    },
+
+    captainNominateResponse: {
+      on: {
+        ACCEPT_NOMINATE: {
+          target: "captainRound",
+          actions: ["clearNominate"],
+        },
+        REJECT_NOMINATE: {
+          target: "captainRound",
+          actions: ["clearNominate"],
+        },
+        TIMER_EXPIRED: {
+          target: "captainRound",
+          actions: ["clearNominate"],
+        },
+      },
+    },
+
+    // ── Reinstatement ───────────────────────────────────────
+
+    reinstatementOffer: {
+      on: {
+        REINSTATE_PLAYER: {
+          target: "captainRound",
+          actions: ["reinstatePlayer"],
+        },
+        CONTINUE_WITHOUT_REINSTATE: {
+          target: "captainRound",
+          actions: ["continueWithoutReinstate"],
+        },
+      },
+    },
+
+    // ── Round end ───────────────────────────────────────────
+
     roundEnd: {
-      // Show full board with reveals, then advance
       on: {
         CONTINUE_REVEAL: [
-          {
-            target: "roundIntro",
-            guard: "hasMoreRounds",
-            actions: ["advanceRound", "setupRound"],
-          },
-          {
-            target: "gameOver",
-          },
+          { target: "roundIntro", guard: "hasMoreRounds", actions: ["advanceRound", "setupRound"] },
+          { target: "gameOver" },
         ],
       },
     },

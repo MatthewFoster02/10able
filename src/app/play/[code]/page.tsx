@@ -7,6 +7,12 @@ import { usePlayerGameState } from "@/hooks/useGameState";
 import { usePlayerStore } from "@/stores/player-store";
 import { AnswerInput } from "./components/AnswerInput";
 import { SpectatorView } from "./components/SpectatorView";
+import {
+  LifelineButtons,
+  NominatedPlayerInput,
+  OverruleView,
+  ReinstatementView,
+} from "./components/LifelineButtons";
 
 export default function PlayerGamePage() {
   const params = useParams<{ code: string }>();
@@ -127,7 +133,41 @@ function PlayerView({
 
     case "individual_round":
     case "captain_round":
-      if (state.canSubmitAnswer) {
+      // Nominated player sees suggestion input
+      if (state.message?.includes("nominated")) {
+        return (
+          <div className="flex flex-1 flex-col justify-center">
+            <NominatedPlayerInput
+              onSubmit={(answer) => socket.emit("nominate_suggestion", { answer })}
+            />
+          </div>
+        );
+      }
+      // Captain sees overrule window
+      if (state.overrulePlayerAnswer && state.canOverrule) {
+        return (
+          <div className="flex flex-1 flex-col justify-center">
+            <OverruleView
+              playerAnswer={state.overrulePlayerAnswer}
+              onOverrule={(answer) => socket.emit("use_overrule", { replacementAnswer: answer })}
+            />
+          </div>
+        );
+      }
+      // Captain sees reinstatement offer
+      if (state.canReinstate && state.eliminatedPlayers.length > 0) {
+        return (
+          <div className="flex flex-1 flex-col justify-center">
+            <ReinstatementView
+              eliminatedPlayers={state.eliminatedPlayers}
+              onReinstate={(playerId) => socket.emit("reinstate_player", { playerId })}
+              onContinue={() => socket.emit("continue_without_reinstate")}
+            />
+          </div>
+        );
+      }
+      // Active player sees answer input
+      if (state.canSubmitAnswer && state.isMyTurn) {
         return (
           <ActivePlayerView
             state={state}
@@ -295,12 +335,41 @@ function ActivePlayerView({
 
       <AnswerInput
         onSubmit={(answer) => socket.emit("submit_answer", { answer })}
-        onBank={() => socket.emit("bank_money")}
-        canBank={state.canBank}
+        onBank={() => {}}
+        canBank={false}
         correctCount={state.correctCount}
         moneyLevel={state.moneyLevel}
         hasLife={state.hasLife}
         timerSeconds={timerSeconds}
+      />
+
+      {/* Nominate suggestion display */}
+      {state.nominateSuggestion && (
+        <div className="rounded-lg border border-blue-500/30 bg-blue-500/5 p-4">
+          <p className="text-sm text-blue-300">Nominated suggestion:</p>
+          <p className="mt-1 text-lg font-bold text-white">{state.nominateSuggestion}</p>
+          <div className="mt-3 flex gap-2">
+            <button
+              onClick={() => socket.emit("accept_nominate")}
+              className="flex-1 rounded-lg bg-green-600 py-2 font-semibold text-white"
+            >
+              Accept
+            </button>
+            <button
+              onClick={() => socket.emit("reject_nominate")}
+              className="flex-1 rounded-lg bg-slate-700 py-2 font-semibold text-slate-300"
+            >
+              Reject
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Lifeline buttons */}
+      <LifelineButtons
+        state={state}
+        onNominate={(targetPlayerId) => socket.emit("use_nominate", { targetPlayerId })}
+        onBank={() => socket.emit("bank_money")}
       />
     </div>
   );
