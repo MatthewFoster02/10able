@@ -453,6 +453,21 @@ export const gameMachine = setup({
       overruleActive: false,
     })),
 
+    revealAllAnswers: assign(({ context }) => {
+      if (!context.currentQuestion) return {};
+      const board = context.board.map((slot) => {
+        if (slot.revealed) return slot;
+        const answer = context.currentQuestion!.answers.find((a) => a.position === slot.position);
+        return {
+          ...slot,
+          answer: answer?.answer ?? null,
+          revealed: true,
+          revealedByPlayer: null,
+        };
+      });
+      return { board };
+    }),
+
     // ── Final round actions ─────────────────────────────────
     setupFinalVote: assign(({ context }) => {
       // Pick 2 random questions for voting
@@ -689,7 +704,7 @@ export const gameMachine = setup({
     roundIntro: {
       after: {
         3000: [
-          { target: "captainRound", guard: "isCaptainRound" },
+          { target: "captainRound", guard: "isCaptainRound", actions: ["assignCaptain"] },
           { target: "captainPicking" },
         ],
       },
@@ -847,7 +862,6 @@ export const gameMachine = setup({
     // ── Captain round states ────────────────────────────────
 
     captainRound: {
-      entry: ["assignCaptain"],
       on: {
         VALIDATED_ALREADY_FOUND: {
           target: "captainRound",
@@ -952,6 +966,7 @@ export const gameMachine = setup({
     // ── Round end ───────────────────────────────────────────
 
     roundEnd: {
+      entry: ["revealAllAnswers"],
       on: {
         CONTINUE_REVEAL: [
           { target: "roundIntro", guard: "hasMoreRounds", actions: ["advanceRound", "setupRound"] },
@@ -1030,7 +1045,7 @@ export const gameMachine = setup({
     },
 
     finalRoundLose: {
-      entry: ["setGameLost"],
+      entry: ["setGameLost", "revealAllAnswers"],
       type: "final",
     },
 
