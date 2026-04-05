@@ -6,7 +6,10 @@
     "dev": "tsx watch server/index.ts",
     "build": "next build && tsc -p tsconfig.server.json",
     "start": "node dist/server/index.js",
-    "lint": "next lint"
+    "lint": "next lint",
+    "generate-questions": "tsx scripts/generate-questions.ts",
+    "verify-questions": "tsx scripts/verify-questions.ts",
+    "generate-audio": "tsx scripts/generate-audio.ts"
   },
   "dependencies": {
     "next": "^15.3.1",

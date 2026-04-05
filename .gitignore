@@ -18,5 +18,8 @@ next-env.d.ts
 # debug
 npm-debug.log*
 
+# Generated audio files (too large for git)
+/public/audio/
+
 # OS
 .DS_Store

@@ -37,7 +37,7 @@ import {
 import { ANSWER_TIMEOUT_SECONDS, OVERRULE_WINDOW_SECONDS } from "../../shared/constants";
 import { checkAnswerLocal } from "../services/questions";
 import { checkAnswerWithOpenAI } from "../services/openai";
-import { generateAnswerAudio, generateWrongAnswerAudio } from "../services/elevenlabs";
+import { generateAnswerAudio, generateWrongAnswerAudio, getPreGeneratedAnswerUrl } from "../services/elevenlabs";
 
 type AppServer = Server<ClientToServerEvents, ServerToClientEvents, InterServerEvents, SocketData>;
 type AppSocket = Socket<ClientToServerEvents, ServerToClientEvents, InterServerEvents, SocketData>;
@@ -597,7 +597,8 @@ async function validateAndSendAnswer(
 
   if (localResult.match) {
     room.gameActor.send({ type: correctType, position: localResult.position, answerText: localResult.answerText } as any);
-    generateAnswerAudio(localResult.position, localResult.answerText).then((audio) => {
+    const preGenUrl = getPreGeneratedAnswerUrl(ctx.currentQuestion.answers, localResult.position);
+    generateAnswerAudio(localResult.position, localResult.answerText, preGenUrl).then((audio) => {
       if (audio) io.to(room.code).emit("play_audio", { url: audio });
     });
     return;
@@ -617,7 +618,8 @@ async function validateAndSendAnswer(
 
   if (aiResult.match && aiResult.position !== null && aiResult.answerText) {
     room.gameActor.send({ type: correctType, position: aiResult.position, answerText: aiResult.answerText } as any);
-    generateAnswerAudio(aiResult.position, aiResult.answerText).then((audio) => {
+    const preGenUrl = getPreGeneratedAnswerUrl(ctx.currentQuestion.answers, aiResult.position);
+    generateAnswerAudio(aiResult.position, aiResult.answerText, preGenUrl).then((audio) => {
       if (audio) io.to(room.code).emit("play_audio", { url: audio });
     });
   } else {

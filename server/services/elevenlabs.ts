@@ -3,8 +3,8 @@
 // ============================================================
 
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
-const VOICE_ID = "21m00Tcm4TlvDq8ikWAM"; // Rachel - warm British voice
-const MODEL_ID = "eleven_turbo_v2_5";
+const VOICE_ID = "bFt7EA8lqWlx3xT4kVAh";
+const MODEL_ID = "eleven_multilingual_v2";
 
 // In-memory cache: text -> base64 audio
 const audioCache = new Map<string, string>();
@@ -77,11 +77,23 @@ export async function pregenerateQuestionAudio(
 
 export async function generateAnswerAudio(
   position: number,
-  answer: string
+  answer: string,
+  preGeneratedUrl?: string
 ): Promise<string | null> {
+  // Use pre-generated audio file if available
+  if (preGeneratedUrl) return preGeneratedUrl;
   return generateSpeech(`Number ${position}... ${answer}`);
 }
 
 export async function generateWrongAnswerAudio(answer: string): Promise<string | null> {
   return generateSpeech(`${answer}... is not on the list`);
+}
+
+// Get pre-generated audio URL for a question's answer
+export function getPreGeneratedAnswerUrl(
+  questionAnswers: { position: number; audio: string }[],
+  position: number
+): string | undefined {
+  const answer = questionAnswers.find((a) => a.position === position);
+  return answer?.audio || undefined;
 }
