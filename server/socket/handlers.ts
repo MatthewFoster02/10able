@@ -31,6 +31,8 @@ import {
   type Room,
 } from "../game/rooms";
 import { ANSWER_TIMEOUT_SECONDS } from "../../shared/constants";
+import { checkAnswerLocal } from "../services/questions";
+import { checkAnswerWithOpenAI } from "../services/openai";
 
 type AppServer = Server<ClientToServerEvents, ServerToClientEvents, InterServerEvents, SocketData>;
 type AppSocket = Socket<ClientToServerEvents, ServerToClientEvents, InterServerEvents, SocketData>;
@@ -184,8 +186,8 @@ export function registerHandlers(io: AppServer): void {
       startTimerSync(io, room);
     });
 
-    // ── Submit answer ───────────────────────────────────────
-    socket.on("submit_answer", (data) => {
+    // ── Submit answer (Tier 1 + Tier 2 validation) ────────
+    socket.on("submit_answer", async (data) => {
       const room = getPlayerRoom(socket);
       if (!room?.gameActor) return;
 
@@ -198,8 +200,54 @@ export function registerHandlers(io: AppServer): void {
         return;
       }
 
-      console.log(`[Room ${room.code}] Answer submitted: "${parsed.data.answer}" by ${socket.data.playerId}`);
-      room.gameActor.send({ type: "SUBMIT_ANSWER", answer: parsed.data.answer });
+      if (!ctx.currentQuestion) return;
+
+      const answer = parsed.data.answer;
+      console.log(`[Room ${room.code}] Answer submitted: "${answer}" by ${socket.data.playerId}`);
+
+      // Tier 1: Local match
+      const localResult = checkAnswerLocal(
+        answer,
+        ctx.currentQuestion.answers,
+        ctx.revealedPositions
+      );
+
+      if (localResult.match) {
+        room.gameActor.send({
+          type: "VALIDATED_CORRECT",
+          position: localResult.position,
+          answerText: localResult.answerText,
+        });
+        return;
+      }
+
+      if (localResult.alreadyFound) {
+        room.gameActor.send({ type: "VALIDATED_ALREADY_FOUND" });
+        return;
+      }
+
+      // Tier 2: OpenAI fuzzy match
+      const remainingAnswers = ctx.currentQuestion.answers.filter(
+        (a) => !ctx.revealedPositions.has(a.position)
+      );
+
+      const aiResult = await checkAnswerWithOpenAI(
+        answer,
+        ctx.currentQuestion.category,
+        ctx.currentQuestion.question,
+        remainingAnswers,
+        ctx.currentQuestion.id
+      );
+
+      if (aiResult.match && aiResult.position !== null && aiResult.answerText) {
+        room.gameActor.send({
+          type: "VALIDATED_CORRECT",
+          position: aiResult.position,
+          answerText: aiResult.answerText,
+        });
+      } else {
+        room.gameActor.send({ type: "VALIDATED_WRONG" });
+      }
     });
 
     // ── Bank money ──────────────────────────────────────────

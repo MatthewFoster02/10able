@@ -60,7 +60,10 @@ export type GameEvent =
   | { type: "BANK" }
   | { type: "TIMER_EXPIRED" }
   | { type: "CONTINUE_REVEAL" }
-  | { type: "REVEAL_COMPLETE" };
+  | { type: "REVEAL_COMPLETE" }
+  | { type: "VALIDATED_CORRECT"; position: number; answerText: string }
+  | { type: "VALIDATED_WRONG" }
+  | { type: "VALIDATED_ALREADY_FOUND" };
 
 // ── Helper functions ─────────────────────────────────────────
 
@@ -239,6 +242,52 @@ export const gameMachine = setup({
         timerDeadline: Date.now() + ANSWER_TIMEOUT_SECONDS * 1000,
       };
     }),
+
+    processValidatedCorrect: assign(({ context, event }) => {
+      if (event.type !== "VALIDATED_CORRECT") return {};
+
+      const newRevealed = new Set(context.revealedPositions);
+      newRevealed.add(event.position);
+
+      const newBoard = context.board.map((slot) =>
+        slot.position === event.position
+          ? {
+              ...slot,
+              answer: event.answerText,
+              revealed: true,
+              revealedByPlayer: context.activePlayerId,
+            }
+          : slot
+      );
+
+      return {
+        board: newBoard,
+        revealedPositions: newRevealed,
+        correctCount: context.correctCount + 1,
+        timerDeadline: Date.now() + ANSWER_TIMEOUT_SECONDS * 1000,
+      };
+    }),
+
+    processValidatedWrong: assign(({ context }) => {
+      if (context.activePlayerHasLife) {
+        return {
+          activePlayerHasLife: false,
+          timerDeadline: Date.now() + ANSWER_TIMEOUT_SECONDS * 1000,
+        };
+      }
+
+      // No life — elimination
+      const players = context.players.map((p) =>
+        p.id === context.activePlayerId
+          ? { ...p, status: "eliminated" as const }
+          : p
+      );
+      return { players, timerDeadline: null };
+    }),
+
+    processValidatedAlreadyFound: assign(({ context }) => ({
+      timerDeadline: Date.now() + ANSWER_TIMEOUT_SECONDS * 1000,
+    })),
 
     handleTimerExpired: assign(({ context }) => {
       // Timer expiry = wrong answer
@@ -422,26 +471,19 @@ export const gameMachine = setup({
     playerTurn: {
       // Active player is answering
       on: {
-        SUBMIT_ANSWER: [
-          {
-            // Already found — no penalty, stay in turn
-            guard: "isAlreadyFound",
-            target: "playerTurn",
-            actions: ["processAnswer"],
-            reenter: true,
-          },
-          {
-            // Correct answer — check if all found
-            guard: "isCorrectAnswer",
-            target: "answerReveal",
-            actions: ["processAnswer"],
-          },
-          {
-            // Wrong answer — process and check if eliminated
-            target: "answerResult",
-            actions: ["processAnswer"],
-          },
-        ],
+        VALIDATED_ALREADY_FOUND: {
+          target: "playerTurn",
+          actions: ["processValidatedAlreadyFound"],
+          reenter: true,
+        },
+        VALIDATED_CORRECT: {
+          target: "answerReveal",
+          actions: ["processValidatedCorrect"],
+        },
+        VALIDATED_WRONG: {
+          target: "answerResult",
+          actions: ["processValidatedWrong"],
+        },
         BANK: {
           guard: "canBank",
           target: "roundEnd",
@@ -487,23 +529,19 @@ export const gameMachine = setup({
       // Captain's turn — same mechanics but no overrule
       entry: ["assignCaptain"],
       on: {
-        SUBMIT_ANSWER: [
-          {
-            guard: "isAlreadyFound",
-            target: "captainRound",
-            actions: ["processAnswer"],
-            reenter: true,
-          },
-          {
-            guard: "isCorrectAnswer",
-            target: "captainAnswerReveal",
-            actions: ["processAnswer"],
-          },
-          {
-            target: "captainAnswerResult",
-            actions: ["processAnswer"],
-          },
-        ],
+        VALIDATED_ALREADY_FOUND: {
+          target: "captainRound",
+          actions: ["processValidatedAlreadyFound"],
+          reenter: true,
+        },
+        VALIDATED_CORRECT: {
+          target: "captainAnswerReveal",
+          actions: ["processValidatedCorrect"],
+        },
+        VALIDATED_WRONG: {
+          target: "captainAnswerResult",
+          actions: ["processValidatedWrong"],
+        },
         BANK: {
           guard: "canBank",
           target: "roundEnd",
