@@ -24,6 +24,29 @@ export function getRandomQuestion(excludeIds: string[]): QuestionData | null {
   return available[Math.floor(Math.random() * available.length)];
 }
 
+export function getTwoRandomQuestionsWithDifferentCategories(
+  excludeIds: string[]
+): [QuestionData, QuestionData] | null {
+  const questions = loadQuestions();
+  const available = questions.filter((q) => !excludeIds.includes(q.id));
+  if (available.length < 2) return null;
+
+  // Shuffle
+  const shuffled = [...available].sort(() => Math.random() - 0.5);
+
+  // Find first pair with different categories
+  for (let i = 0; i < shuffled.length; i++) {
+    for (let j = i + 1; j < shuffled.length; j++) {
+      if (shuffled[i].category !== shuffled[j].category) {
+        return [shuffled[i], shuffled[j]];
+      }
+    }
+  }
+
+  // Fallback: all same category, just pick two
+  return [shuffled[0], shuffled[1]];
+}
+
 export function getQuestionById(id: string): QuestionData | null {
   const questions = loadQuestions();
   return questions.find((q) => q.id === id) ?? null;

@@ -12,7 +12,7 @@ import {
   ANSWERS_PER_LIST,
   OVERRULE_WINDOW_SECONDS,
 } from "../../shared/constants";
-import { getRandomQuestion } from "../services/questions";
+import { getRandomQuestion, getTwoRandomQuestionsWithDifferentCategories } from "../services/questions";
 
 // ── Context ──────────────────────────────────────────────────
 
@@ -468,12 +468,29 @@ export const gameMachine = setup({
       return { board };
     }),
 
+    revealNextAnswer: assign(({ context }) => {
+      if (!context.currentQuestion) return {};
+      // Find the highest-position unrevealed slot (bottom to top: 10, 9, 8...)
+      const unrevealed = context.board
+        .filter((slot) => !slot.revealed)
+        .sort((a, b) => b.position - a.position);
+      if (unrevealed.length === 0) return {};
+      const next = unrevealed[0];
+      const answer = context.currentQuestion.answers.find((a) => a.position === next.position);
+      const board = context.board.map((slot) =>
+        slot.position === next.position
+          ? { ...slot, answer: answer?.answer ?? null, revealed: true, revealedByPlayer: null }
+          : slot
+      );
+      return { board };
+    }),
+
     // ── Final round actions ─────────────────────────────────
     setupFinalVote: assign(({ context }) => {
-      // Pick 2 random questions for voting
-      const available = getRandomQuestion(context.usedQuestionIds);
-      const available2 = getRandomQuestion([...context.usedQuestionIds, available?.id ?? ""]);
-      if (!available || !available2) throw new Error("Not enough questions for final vote");
+      // Pick 2 random questions with different categories for voting
+      const pair = getTwoRandomQuestionsWithDifferentCategories(context.usedQuestionIds);
+      if (!pair) throw new Error("Not enough questions for final vote");
+      const [available, available2] = pair;
 
       return {
         finalVoteOptions: [available, available2] as [QuestionData, QuestionData],
@@ -652,6 +669,8 @@ export const gameMachine = setup({
       });
       return alive.length === 0;
     },
+    allBoardRevealed: ({ context }) =>
+      context.board.every((slot) => slot.revealed),
     hasQualifiedPlayers: ({ context }) =>
       context.players.some((p) => p.status === "qualified" || p.status === "reinstated" || p.isCaptain),
   },
@@ -966,9 +985,11 @@ export const gameMachine = setup({
     // ── Round end ───────────────────────────────────────────
 
     roundEnd: {
-      entry: ["revealAllAnswers"],
       on: {
         CONTINUE_REVEAL: [
+          // If unrevealed answers remain, reveal next one (bottom to top)
+          { target: "roundEnd", guard: ({ context }) => !context.board.every((s) => s.revealed), actions: ["revealNextAnswer"], reenter: true },
+          // All revealed — advance to next round or final
           { target: "roundIntro", guard: "hasMoreRounds", actions: ["advanceRound", "setupRound"] },
           { target: "finalVote", actions: ["setupFinalVote"] },
         ],
