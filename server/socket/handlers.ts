@@ -155,9 +155,31 @@ export function registerHandlers(io: AppServer): void {
 
       // Set up state subscription — broadcast on every transition
       if (room.gameActor) {
+        let lastState = "";
         room.gameActor.subscribe((snapshot: any) => {
+          const currentState = snapshot.value as string;
           broadcastState(io, room);
           broadcastPlayerStates(io, room);
+
+          // Play question audio when entering roundIntro
+          if (currentState === "roundIntro" && lastState !== "roundIntro") {
+            const ctx = snapshot.context;
+            if (ctx?.currentQuestion) {
+              const q = ctx.currentQuestion;
+              // Queue: category announcement, then question, then description
+              if (q.audio?.category) {
+                io.to(room.code).emit("play_audio", { url: q.audio.category });
+              }
+              if (q.audio?.question) {
+                io.to(room.code).emit("play_audio", { url: q.audio.question });
+              }
+              if (q.audio?.description) {
+                io.to(room.code).emit("play_audio", { url: q.audio.description });
+              }
+            }
+          }
+
+          lastState = currentState;
         });
 
         // Start timer sync

@@ -721,8 +721,9 @@ export const gameMachine = setup({
     },
 
     roundIntro: {
-      after: {
-        3000: [
+      // Captain presses Continue to advance (after audio finishes playing)
+      on: {
+        CONTINUE_REVEAL: [
           { target: "captainRound", guard: "isCaptainRound", actions: ["assignCaptain"] },
           { target: "captainPicking" },
         ],

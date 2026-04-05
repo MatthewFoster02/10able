@@ -129,7 +129,12 @@ function PlayerView({
       return <SpectatorView state={state} />;
 
     case "round_intro":
-      return <RoundIntroView state={state} />;
+      return (
+        <RoundIntroView
+          state={state}
+          onContinue={() => socket.emit("continue_reveal")}
+        />
+      );
 
     case "individual_round":
     case "captain_round":
@@ -285,7 +290,13 @@ function LobbyView({
 
 // ── Round Intro ─────────────────────────────────────────────
 
-function RoundIntroView({ state }: { state: ReturnType<typeof usePlayerStore.getState> }) {
+function RoundIntroView({
+  state,
+  onContinue,
+}: {
+  state: ReturnType<typeof usePlayerStore.getState>;
+  onContinue: () => void;
+}) {
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-6 text-center">
       <p className="text-sm uppercase tracking-widest text-slate-500">
@@ -293,6 +304,15 @@ function RoundIntroView({ state }: { state: ReturnType<typeof usePlayerStore.get
       </p>
       <h1 className="text-2xl font-bold text-amber-400">{state.category}</h1>
       <p className="text-lg text-white">{state.question}</p>
+
+      {state.isCaptain && (
+        <button
+          onClick={onContinue}
+          className="mt-4 rounded-lg bg-amber-500 px-8 py-4 text-lg font-bold text-slate-950 transition hover:bg-amber-400"
+        >
+          Continue
+        </button>
+      )}
     </div>
   );
 }
