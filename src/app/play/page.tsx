@@ -1,14 +1,23 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useSocket } from "@/hooks/useSocket";
+
+function getSavedName(): string {
+  if (typeof window === "undefined") return "";
+  return localStorage.getItem("tenablePlayerName") ?? "";
+}
 
 export default function PlayerJoinPage() {
   const { socket, connected } = useSocket();
   const router = useRouter();
   const [roomCode, setRoomCode] = useState("");
   const [playerName, setPlayerName] = useState("");
+
+  useEffect(() => {
+    setPlayerName(getSavedName());
+  }, []);
   const [joining, setJoining] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -26,6 +35,7 @@ export default function PlayerJoinPage() {
         setJoining(false);
         if (response.ok) {
           if (typeof window !== "undefined") {
+            localStorage.setItem("tenablePlayerName", playerName.trim());
             sessionStorage.setItem("playerId", response.playerId);
             sessionStorage.setItem("playerName", playerName.trim());
           }

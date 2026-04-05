@@ -893,12 +893,13 @@ export const gameMachine = setup({
 
     captainAnswerResult: {
       always: [
-        // Captain isn't eliminated, but second wrong = round ends
+        // Second wrong answer = round ends (timerDeadline is null when round should end)
         {
           target: "roundEnd",
-          guard: ({ context }) => !context.activePlayerHasLife,
+          guard: ({ context }) => context.timerDeadline === null,
           actions: ["recordElimination"],
         },
+        // Life was consumed but play continues
         { target: "captainRound" },
       ],
     },
