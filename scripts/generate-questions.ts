@@ -3,6 +3,9 @@
 // Usage: npx tsx scripts/generate-questions.ts [--count 100] [--category "Film"]
 // ============================================================
 
+import { config } from "dotenv";
+config({ path: ".env.local" });
+
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 

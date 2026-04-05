@@ -3,6 +3,9 @@
 // Usage: npx tsx scripts/generate-audio.ts [--force] [--question-id "foo"]
 // ============================================================
 
+import { config } from "dotenv";
+config({ path: ".env.local" });
+
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 

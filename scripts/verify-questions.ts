@@ -3,6 +3,9 @@
 // Usage: npx tsx scripts/verify-questions.ts [--unverified-only] [--category "Film"]
 // ============================================================
 
+import { config } from "dotenv";
+config({ path: ".env.local" });
+
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
