@@ -212,7 +212,12 @@ function PlayerView({
       return <SpectatorView state={state} />;
 
     case "game_over":
-      return <GameOverView state={state} />;
+      return (
+        <GameOverView
+          state={state}
+          onContinue={() => socket.emit("continue_reveal")}
+        />
+      );
 
     default:
       return <SpectatorView state={state} />;
@@ -541,7 +546,13 @@ function FinalRoundPlayerView({
 
 // ── Game Over ───────────────────────────────────────────────
 
-function GameOverView({ state }: { state: ReturnType<typeof usePlayerStore.getState> }) {
+function GameOverView({
+  state,
+  onContinue,
+}: {
+  state: ReturnType<typeof usePlayerStore.getState>;
+  onContinue: () => void;
+}) {
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-6 text-center">
       <h1 className="text-4xl font-black text-amber-400">GAME OVER</h1>
@@ -554,6 +565,14 @@ function GameOverView({ state }: { state: ReturnType<typeof usePlayerStore.getSt
           {"\u00A3"}{state.prizePot.toLocaleString()}
         </span>
       </p>
+      {state.isCaptain && (
+        <button
+          onClick={onContinue}
+          className="mt-4 rounded-lg bg-amber-500 px-8 py-4 text-lg font-bold text-slate-950 transition hover:bg-amber-400"
+        >
+          Continue
+        </button>
+      )}
     </div>
   );
 }

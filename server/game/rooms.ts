@@ -186,7 +186,7 @@ export function startGame(room: Room): void {
 
   room.gameActor = actor;
   actor.start();
-  actor.send({ type: "START_GAME" });
+  // NOTE: don't send START_GAME here — caller sets up subscription first, then calls sendStartGame
 }
 
 export function getGameContext(room: Room): GameContext | null {

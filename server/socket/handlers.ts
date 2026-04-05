@@ -153,7 +153,7 @@ export function registerHandlers(io: AppServer): void {
 
       startGame(room);
 
-      // Set up state subscription — broadcast on every transition
+      // Set up state subscription BEFORE sending START_GAME so first transition is captured
       if (room.gameActor) {
         let lastState = "";
         room.gameActor.subscribe((snapshot: any) => {
@@ -179,8 +179,25 @@ export function registerHandlers(io: AppServer): void {
             }
           }
 
-          // Play audio for revealed answers during round end
-          if (currentState === "roundEnd") {
+          // Play question audio when entering finalRound
+          if (currentState === "finalRound" && lastState !== "finalRound") {
+            const ctx = snapshot.context;
+            if (ctx?.currentQuestion) {
+              const q = ctx.currentQuestion;
+              if (q.audio?.category) {
+                io.to(room.code).emit("play_audio", { url: q.audio.category });
+              }
+              if (q.audio?.question) {
+                io.to(room.code).emit("play_audio", { url: q.audio.question });
+              }
+              if (q.audio?.description) {
+                io.to(room.code).emit("play_audio", { url: q.audio.description });
+              }
+            }
+          }
+
+          // Play audio for revealed answers during round end or final round loss
+          if (currentState === "roundEnd" || currentState === "finalRoundLose") {
             const ctx = snapshot.context;
             if (ctx?.lastRevealedPosition && ctx?.currentQuestion) {
               const answer = ctx.currentQuestion.answers.find(
@@ -197,6 +214,9 @@ export function registerHandlers(io: AppServer): void {
 
         // Start timer sync
         startTimerSync(io, room);
+
+        // NOW send START_GAME — subscription will capture the roundIntro transition
+        room.gameActor.send({ type: "START_GAME" });
       }
 
       broadcastState(io, room);

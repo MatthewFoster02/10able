@@ -1071,8 +1071,14 @@ export const gameMachine = setup({
     },
 
     finalRoundLose: {
-      entry: ["setGameLost", "revealAllAnswers"],
-      type: "final",
+      entry: ["setGameLost"],
+      on: {
+        CONTINUE_REVEAL: [
+          // Reveal missing answers one at a time, then go to gameOver
+          { target: "finalRoundLose", guard: ({ context }) => !context.board.every((s) => s.revealed), actions: ["revealNextAnswer"], reenter: true },
+          { target: "gameOver" },
+        ],
+      },
     },
 
     gameOver: {
