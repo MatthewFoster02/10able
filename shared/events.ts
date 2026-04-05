@@ -35,6 +35,9 @@ export interface ClientToServerEvents {
   // Final round
   vote_final_category: (data: { categoryIndex: number }) => void;
 
+  // Round end advancement
+  continue_reveal: () => void;
+
   // Heartbeat
   room_heartbeat: () => void;
 }

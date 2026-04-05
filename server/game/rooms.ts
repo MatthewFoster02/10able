@@ -2,8 +2,10 @@
 // Room manager — creates/tracks rooms and player sessions
 // ============================================================
 
-import { ROOM_CODE_LENGTH, ROOM_CODE_CHARS, MAX_PLAYERS } from "../../shared/constants";
-import type { Player, RoomState, GamePhase, BoardSlot, MoneyLadderTier, RoundResult } from "../../shared/types";
+import { createActor, type AnyActorRef } from "xstate";
+import { ROOM_CODE_LENGTH, ROOM_CODE_CHARS, MAX_PLAYERS, MONEY_LADDER, ANSWER_TIMEOUT_SECONDS } from "../../shared/constants";
+import type { Player, RoomState, PlayerState, GamePhase, BoardSlot, MoneyLadderTier, RoundResult } from "../../shared/types";
+import { gameMachine, type GameContext } from "./machine";
 
 export interface Room {
   code: string;
@@ -15,6 +17,11 @@ export interface Room {
   playerSockets: Map<string, string>;
   // Room display socket IDs
   displaySockets: Set<string>;
+
+  // Game actor (null until game starts)
+  gameActor: AnyActorRef | null;
+  // Timer interval for countdown sync
+  timerInterval: ReturnType<typeof setInterval> | null;
 }
 
 const rooms = new Map<string, Room>();
@@ -43,6 +50,8 @@ export function createRoom(): Room {
     createdAt: Date.now(),
     playerSockets: new Map(),
     displaySockets: new Set(),
+    gameActor: null,
+    timerInterval: null,
   };
   rooms.set(code, room);
   return room;
@@ -161,4 +170,199 @@ export function buildLobbyRoomState(room: Room): RoomState {
 
 export function getAllRooms(): Map<string, Room> {
   return rooms;
+}
+
+// ── Game actor management ────────────────────────────────────
+
+export function startGame(room: Room): void {
+  if (room.gameActor) return; // already started
+
+  const actor = createActor(gameMachine, {
+    input: {
+      roomCode: room.code,
+      players: [...room.players],
+    },
+  });
+
+  room.gameActor = actor;
+  actor.start();
+  actor.send({ type: "START_GAME" });
+}
+
+export function getGameContext(room: Room): GameContext | null {
+  if (!room.gameActor) return null;
+  const snapshot = room.gameActor.getSnapshot();
+  return snapshot.context as GameContext;
+}
+
+export function getGameState(room: Room): string | null {
+  if (!room.gameActor) return null;
+  const snapshot = room.gameActor.getSnapshot();
+  return snapshot.value as string;
+}
+
+// Map XState state to our GamePhase
+function mapStateToPhase(state: string): GamePhase {
+  const mapping: Record<string, GamePhase> = {
+    lobby: "lobby",
+    roundIntro: "round_intro",
+    captainPicking: "captain_picking",
+    playerTurn: "individual_round",
+    answerReveal: "individual_round",
+    answerResult: "individual_round",
+    captainRound: "captain_round",
+    captainAnswerReveal: "captain_round",
+    captainAnswerResult: "captain_round",
+    roundEnd: "round_end",
+    gameOver: "game_over",
+  };
+  return mapping[state] ?? "lobby";
+}
+
+export function buildRoomStateFromGame(room: Room): RoomState {
+  const ctx = getGameContext(room);
+  const state = getGameState(room);
+
+  if (!ctx || !state) return buildLobbyRoomState(room);
+
+  const phase = mapStateToPhase(state);
+  const activePlayer = ctx.players.find((p) => p.id === ctx.activePlayerId);
+
+  const timerSeconds = ctx.timerDeadline
+    ? Math.max(0, Math.ceil((ctx.timerDeadline - Date.now()) / 1000))
+    : null;
+
+  return {
+    phase,
+    roomCode: room.code,
+    players: ctx.players,
+    currentRound: ctx.currentRound,
+    totalRounds: ctx.totalRounds,
+    activePlayerId: ctx.activePlayerId,
+    activePlayerName: activePlayer?.name ?? null,
+    category: ctx.currentQuestion?.category ?? null,
+    question: ctx.currentQuestion?.question ?? null,
+    description: ctx.currentQuestion?.description ?? null,
+    board: ctx.board,
+    prizePot: ctx.prizePot,
+    currentRoundCorrectCount: ctx.correctCount,
+    currentRoundMoneyLevel: ctx.moneyLadder[ctx.correctCount] ?? 0,
+    moneyLadder: ctx.moneyLadder.map((amount, i) => ({
+      correctCount: i,
+      amount,
+      active: i === ctx.correctCount,
+      locked: i < 5,
+    })),
+    nominatesRemaining: ctx.nominatesRemaining,
+    overruleAvailable: !ctx.overruleUsedThisRound && phase === "individual_round",
+    overruleUsedThisRound: ctx.overruleUsedThisRound,
+    activePlayerHasLife: ctx.activePlayerHasLife,
+    timerSeconds,
+    finalVote: null,
+    finalTurnOrder: [],
+    finalCurrentTurnIndex: 0,
+    roundHistory: ctx.roundHistory,
+    message: null,
+  };
+}
+
+export function buildPlayerStateFromGame(room: Room, playerId: string): PlayerState {
+  const ctx = getGameContext(room);
+  const state = getGameState(room);
+
+  if (!ctx || !state) {
+    // Fall back to lobby state
+    const player = room.players.find((p) => p.id === playerId);
+    return {
+      phase: "lobby",
+      playerId,
+      playerName: player?.name ?? "",
+      isCaptain: player?.isCaptain ?? false,
+      isMyTurn: false,
+      myStatus: player?.status ?? "waiting",
+      roomCode: room.code,
+      currentRound: 0,
+      totalRounds: room.players.length,
+      activePlayerName: null,
+      category: null,
+      question: null,
+      correctCount: 0,
+      moneyLevel: 0,
+      hasLife: true,
+      canSubmitAnswer: false,
+      canBank: false,
+      canNominate: false,
+      canOverrule: false,
+      canStartGame: player?.isCaptain === true && room.players.length >= 2,
+      canPickPlayer: false,
+      canReinstate: false,
+      availablePlayers: [],
+      eliminatedPlayers: [],
+      nominateSuggestion: null,
+      overrulePlayerAnswer: null,
+      prizePot: 0,
+      players: room.players,
+      timerSeconds: null,
+      finalVoteOptions: null,
+      hasVoted: false,
+      message: null,
+    };
+  }
+
+  const phase = mapStateToPhase(state);
+  const player = ctx.players.find((p) => p.id === playerId);
+  const activePlayer = ctx.players.find((p) => p.id === ctx.activePlayerId);
+  const isMyTurn = ctx.activePlayerId === playerId;
+  const isCaptain = player?.isCaptain ?? false;
+
+  const isPlayerTurnState = ["playerTurn", "captainRound"].includes(state);
+
+  const timerSeconds = ctx.timerDeadline
+    ? Math.max(0, Math.ceil((ctx.timerDeadline - Date.now()) / 1000))
+    : null;
+
+  // Available players for captain picking
+  const availablePlayers =
+    state === "captainPicking"
+      ? ctx.players
+          .filter(
+            (p) => !p.isCaptain && !ctx.playOrder.includes(p.id) && p.status !== "eliminated"
+          )
+          .map((p) => ({ id: p.id, name: p.name }))
+      : [];
+
+  return {
+    phase,
+    playerId,
+    playerName: player?.name ?? "",
+    isCaptain,
+    isMyTurn,
+    myStatus: player?.status ?? "waiting",
+    roomCode: room.code,
+    currentRound: ctx.currentRound,
+    totalRounds: ctx.totalRounds,
+    activePlayerName: activePlayer?.name ?? null,
+    category: ctx.currentQuestion?.category ?? null,
+    question: ctx.currentQuestion?.question ?? null,
+    correctCount: isMyTurn ? ctx.correctCount : 0,
+    moneyLevel: isMyTurn ? (ctx.moneyLadder[ctx.correctCount] ?? 0) : 0,
+    hasLife: isMyTurn ? ctx.activePlayerHasLife : false,
+    canSubmitAnswer: isMyTurn && isPlayerTurnState,
+    canBank: isMyTurn && isPlayerTurnState && ctx.correctCount >= 5,
+    canNominate: false, // Phase 4
+    canOverrule: false, // Phase 4
+    canStartGame: false,
+    canPickPlayer: isCaptain && state === "captainPicking",
+    canReinstate: false, // Phase 4
+    availablePlayers,
+    eliminatedPlayers: [],
+    nominateSuggestion: null,
+    overrulePlayerAnswer: null,
+    prizePot: ctx.prizePot,
+    players: ctx.players,
+    timerSeconds,
+    finalVoteOptions: null,
+    hasVoted: false,
+    message: null,
+  };
 }

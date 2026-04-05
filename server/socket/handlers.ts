@@ -9,10 +9,11 @@ import type {
   InterServerEvents,
   SocketData,
 } from "../../shared/events";
-import type { PlayerState } from "../../shared/types";
 import {
   joinRoomSchema,
   subscribeRoomSchema,
+  captainPickPlayerSchema,
+  submitAnswerSchema,
 } from "../../shared/validation";
 import {
   createRoom,
@@ -21,9 +22,15 @@ import {
   disconnectPlayer,
   addDisplaySocket,
   removeDisplaySocket,
-  getSocketIdForPlayer,
   buildLobbyRoomState,
+  startGame,
+  buildRoomStateFromGame,
+  buildPlayerStateFromGame,
+  getGameContext,
+  getGameState,
+  type Room,
 } from "../game/rooms";
+import { ANSWER_TIMEOUT_SECONDS } from "../../shared/constants";
 
 type AppServer = Server<ClientToServerEvents, ServerToClientEvents, InterServerEvents, SocketData>;
 type AppSocket = Socket<ClientToServerEvents, ServerToClientEvents, InterServerEvents, SocketData>;
@@ -46,8 +53,6 @@ export function registerHandlers(io: AppServer): void {
 
       console.log(`[Room] Created: ${room.code}`);
       callback({ ok: true, roomCode: room.code });
-
-      // Send initial state
       io.to(room.code).emit("room_state", buildLobbyRoomState(room));
     });
 
@@ -71,7 +76,13 @@ export function registerHandlers(io: AppServer): void {
       socket.join(room.code);
 
       callback({ ok: true });
-      socket.emit("room_state", buildLobbyRoomState(room));
+
+      // Send current state (lobby or game)
+      if (room.gameActor) {
+        socket.emit("room_state", buildRoomStateFromGame(room));
+      } else {
+        socket.emit("room_state", buildLobbyRoomState(room));
+      }
     });
 
     // ── Player joining (from Player Site) ───────────────────
@@ -110,17 +121,15 @@ export function registerHandlers(io: AppServer): void {
         io.to(room.code).emit("player_joined", { player: result.player });
       }
 
-      // Broadcast updated room state to everyone
-      const roomState = buildLobbyRoomState(room);
-      io.to(room.code).emit("room_state", roomState);
+      // Broadcast updated state
+      broadcastState(io, room);
 
       // Send targeted player state
-      socket.emit("player_state", buildPlayerState(room, result.player.id));
+      socket.emit("player_state", buildPlayerStateFromGame(room, result.player.id));
     });
 
     // ── Start game (captain only) ───────────────────────────
     socket.on("start_game", () => {
-      // Will be implemented in Phase 2 with the game machine
       const room = getPlayerRoom(socket);
       if (!room) return;
 
@@ -135,8 +144,92 @@ export function registerHandlers(io: AppServer): void {
         return;
       }
 
-      console.log(`[Room ${room.code}] Game start requested by captain`);
-      // Phase 2: machine.send({ type: 'START_GAME' })
+      console.log(`[Room ${room.code}] Game starting!`);
+
+      startGame(room);
+
+      // Set up state subscription — broadcast on every transition
+      if (room.gameActor) {
+        room.gameActor.subscribe((snapshot: any) => {
+          broadcastState(io, room);
+          broadcastPlayerStates(io, room);
+        });
+
+        // Start timer sync
+        startTimerSync(io, room);
+      }
+
+      broadcastState(io, room);
+      broadcastPlayerStates(io, room);
+    });
+
+    // ── Captain picks a player ──────────────────────────────
+    socket.on("captain_pick_player", (data) => {
+      const room = getPlayerRoom(socket);
+      if (!room?.gameActor) return;
+
+      const parsed = captainPickPlayerSchema.safeParse(data);
+      if (!parsed.success) return;
+
+      const player = room.players.find((p) => p.id === socket.data.playerId);
+      if (!player?.isCaptain) {
+        socket.emit("game_error", { message: "Only the captain can pick players." });
+        return;
+      }
+
+      console.log(`[Room ${room.code}] Captain picked player: ${parsed.data.playerId}`);
+      room.gameActor.send({ type: "CAPTAIN_PICK", playerId: parsed.data.playerId });
+
+      // Start timer for the picked player
+      startTimerSync(io, room);
+    });
+
+    // ── Submit answer ───────────────────────────────────────
+    socket.on("submit_answer", (data) => {
+      const room = getPlayerRoom(socket);
+      if (!room?.gameActor) return;
+
+      const parsed = submitAnswerSchema.safeParse(data);
+      if (!parsed.success) return;
+
+      const ctx = getGameContext(room);
+      if (!ctx || ctx.activePlayerId !== socket.data.playerId) {
+        socket.emit("game_error", { message: "It's not your turn." });
+        return;
+      }
+
+      console.log(`[Room ${room.code}] Answer submitted: "${parsed.data.answer}" by ${socket.data.playerId}`);
+      room.gameActor.send({ type: "SUBMIT_ANSWER", answer: parsed.data.answer });
+    });
+
+    // ── Bank money ──────────────────────────────────────────
+    socket.on("bank_money", () => {
+      const room = getPlayerRoom(socket);
+      if (!room?.gameActor) return;
+
+      const ctx = getGameContext(room);
+      if (!ctx || ctx.activePlayerId !== socket.data.playerId) {
+        socket.emit("game_error", { message: "It's not your turn." });
+        return;
+      }
+
+      console.log(`[Room ${room.code}] Player banking money`);
+      room.gameActor.send({ type: "BANK" });
+    });
+
+    // ── Continue from round end ───────────────────────────────
+    socket.on("continue_reveal", () => {
+      const room = getPlayerRoom(socket);
+      if (!room?.gameActor) return;
+
+      // Only allow from captain or room display
+      const player = room.players.find((p) => p.id === socket.data.playerId);
+      if (!player?.isCaptain && !socket.data.isRoomDisplay) {
+        return;
+      }
+
+      console.log(`[Room ${room.code}] Continuing from round end`);
+      room.gameActor.send({ type: "CONTINUE_REVEAL" });
     });
 
     // ── Disconnect ──────────────────────────────────────────
@@ -153,7 +246,7 @@ export function registerHandlers(io: AppServer): void {
             if (player) {
               console.log(`[Room ${room.code}] Player disconnected: ${player.name}`);
               io.to(room.code).emit("player_disconnected", { playerId: player.id });
-              io.to(room.code).emit("room_state", buildLobbyRoomState(room));
+              broadcastState(io, room);
             }
           }
         }
@@ -164,49 +257,57 @@ export function registerHandlers(io: AppServer): void {
 
 // ── Helpers ───────────────────────────────────────────────────
 
-function getPlayerRoom(socket: AppSocket) {
+function getPlayerRoom(socket: AppSocket): Room | null {
   if (!socket.data.roomCode) return null;
   return getRoom(socket.data.roomCode) ?? null;
 }
 
-function buildPlayerState(room: ReturnType<typeof getRoom> extends infer R ? NonNullable<R> : never, playerId: string): PlayerState {
-  const player = room.players.find((p) => p.id === playerId);
-  if (!player) {
-    throw new Error(`Player ${playerId} not found in room ${room.code}`);
+function broadcastState(io: AppServer, room: Room): void {
+  const state = room.gameActor
+    ? buildRoomStateFromGame(room)
+    : buildLobbyRoomState(room);
+  io.to(room.code).emit("room_state", state);
+}
+
+function broadcastPlayerStates(io: AppServer, room: Room): void {
+  for (const player of room.players) {
+    const socketId = room.playerSockets.get(player.id);
+    if (socketId) {
+      const playerState = buildPlayerStateFromGame(room, player.id);
+      io.to(socketId).emit("player_state", playerState);
+    }
+  }
+}
+
+function startTimerSync(io: AppServer, room: Room): void {
+  // Clear any existing timer
+  if (room.timerInterval) {
+    clearInterval(room.timerInterval);
+    room.timerInterval = null;
   }
 
-  return {
-    phase: room.phase,
-    playerId: player.id,
-    playerName: player.name,
-    isCaptain: player.isCaptain,
-    isMyTurn: false,
-    myStatus: player.status,
-    roomCode: room.code,
-    currentRound: 0,
-    totalRounds: room.players.length,
-    activePlayerName: null,
-    category: null,
-    question: null,
-    correctCount: 0,
-    moneyLevel: 0,
-    hasLife: true,
-    canSubmitAnswer: false,
-    canBank: false,
-    canNominate: false,
-    canOverrule: false,
-    canStartGame: player.isCaptain && room.players.length >= 2,
-    canPickPlayer: false,
-    canReinstate: false,
-    availablePlayers: [],
-    eliminatedPlayers: [],
-    nominateSuggestion: null,
-    overrulePlayerAnswer: null,
-    prizePot: 0,
-    players: room.players,
-    timerSeconds: null,
-    finalVoteOptions: null,
-    hasVoted: false,
-    message: null,
-  };
+  room.timerInterval = setInterval(() => {
+    const ctx = getGameContext(room);
+    if (!ctx?.timerDeadline) {
+      if (room.timerInterval) {
+        clearInterval(room.timerInterval);
+        room.timerInterval = null;
+      }
+      return;
+    }
+
+    const secondsRemaining = Math.max(0, Math.ceil((ctx.timerDeadline - Date.now()) / 1000));
+    io.to(room.code).emit("timer_sync", { secondsRemaining });
+
+    if (secondsRemaining <= 0) {
+      // Timer expired
+      if (room.timerInterval) {
+        clearInterval(room.timerInterval);
+        room.timerInterval = null;
+      }
+      if (room.gameActor) {
+        room.gameActor.send({ type: "TIMER_EXPIRED" });
+      }
+    }
+  }, 1000);
 }

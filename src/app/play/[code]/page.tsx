@@ -5,6 +5,8 @@ import { useParams, useRouter } from "next/navigation";
 import { useSocket } from "@/hooks/useSocket";
 import { usePlayerGameState } from "@/hooks/useGameState";
 import { usePlayerStore } from "@/stores/player-store";
+import { AnswerInput } from "./components/AnswerInput";
+import { SpectatorView } from "./components/SpectatorView";
 
 export default function PlayerGamePage() {
   const params = useParams<{ code: string }>();
@@ -13,19 +15,24 @@ export default function PlayerGamePage() {
   const { socket, connected } = useSocket();
   const [joined, setJoined] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [timerSeconds, setTimerSeconds] = useState<number | null>(null);
 
   usePlayerGameState(socket);
 
-  const {
-    phase,
-    playerName,
-    isCaptain,
-    canStartGame,
-    players,
-    message,
-  } = usePlayerStore();
+  const state = usePlayerStore();
 
-  // Auto-rejoin on page load (e.g. after refresh)
+  // Timer sync
+  useEffect(() => {
+    function onTimerSync(data: { secondsRemaining: number }) {
+      setTimerSeconds(data.secondsRemaining);
+    }
+    socket.on("timer_sync", onTimerSync);
+    return () => {
+      socket.off("timer_sync", onTimerSync);
+    };
+  }, [socket]);
+
+  // Auto-rejoin on page load
   useEffect(() => {
     if (!connected || joined) return;
 
@@ -77,71 +84,110 @@ export default function PlayerGamePage() {
     );
   }
 
-  // Lobby phase
-  if (phase === "lobby") {
-    return (
-      <PlayerLobby
-        roomCode={roomCode}
-        playerName={playerName}
-        isCaptain={isCaptain}
-        canStartGame={canStartGame}
-        players={players}
-        onStartGame={() => socket.emit("start_game")}
-      />
-    );
-  }
-
-  // Other phases will be implemented in later commits
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center px-6">
-      <p className="text-lg text-slate-400">Game phase: {phase}</p>
-      {message && <p className="mt-2 text-amber-400">{message}</p>}
+    <div className="flex min-h-screen flex-col px-6 py-8">
+      <PlayerView state={state} socket={socket} timerSeconds={timerSeconds} />
     </div>
   );
 }
 
-function PlayerLobby({
-  roomCode,
-  playerName,
-  isCaptain,
-  canStartGame,
-  players,
+function PlayerView({
+  state,
+  socket,
+  timerSeconds,
+}: {
+  state: ReturnType<typeof usePlayerStore.getState>;
+  socket: ReturnType<typeof useSocket>["socket"];
+  timerSeconds: number | null;
+}) {
+  switch (state.phase) {
+    case "lobby":
+      return (
+        <LobbyView
+          state={state}
+          onStartGame={() => socket.emit("start_game")}
+        />
+      );
+
+    case "captain_picking":
+      if (state.canPickPlayer) {
+        return (
+          <CaptainPickView
+            state={state}
+            onPick={(playerId) =>
+              socket.emit("captain_pick_player", { playerId })
+            }
+          />
+        );
+      }
+      return <SpectatorView state={state} />;
+
+    case "round_intro":
+      return <RoundIntroView state={state} />;
+
+    case "individual_round":
+    case "captain_round":
+      if (state.canSubmitAnswer) {
+        return (
+          <ActivePlayerView
+            state={state}
+            socket={socket}
+            timerSeconds={timerSeconds}
+          />
+        );
+      }
+      return <SpectatorView state={state} />;
+
+    case "round_end":
+      return (
+        <RoundEndView
+          state={state}
+          onContinue={() => socket.emit("continue_reveal")}
+        />
+      );
+
+    case "game_over":
+      return <GameOverView state={state} />;
+
+    default:
+      return <SpectatorView state={state} />;
+  }
+}
+
+// ── Lobby ──────────────────────────────────────────────────
+
+function LobbyView({
+  state,
   onStartGame,
 }: {
-  roomCode: string;
-  playerName: string;
-  isCaptain: boolean;
-  canStartGame: boolean;
-  players: { id: string; name: string; isCaptain: boolean; connected: boolean }[];
+  state: ReturnType<typeof usePlayerStore.getState>;
   onStartGame: () => void;
 }) {
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center gap-8 px-6">
+    <div className="flex flex-1 flex-col items-center justify-center gap-8">
       <div className="text-center">
-        <p className="text-sm uppercase tracking-widest text-slate-500">
-          Room
-        </p>
+        <p className="text-sm uppercase tracking-widest text-slate-500">Room</p>
         <p className="text-4xl font-black tracking-[0.2em] text-amber-400">
-          {roomCode}
+          {state.roomCode}
         </p>
       </div>
 
       <div className="text-center">
         <p className="text-slate-400">
-          You are <span className="font-semibold text-white">{playerName}</span>
+          You are{" "}
+          <span className="font-semibold text-white">{state.playerName}</span>
         </p>
-        {isCaptain && (
+        {state.isCaptain && (
           <p className="mt-1 text-sm text-amber-400">You are the Captain</p>
         )}
       </div>
 
-      {/* Player list */}
       <div className="w-full max-w-sm">
         <h3 className="mb-3 text-center text-sm font-medium uppercase tracking-wider text-slate-500">
           Players
         </h3>
         <ul className="space-y-2">
-          {players.map((p) => (
+          {state.players.map((p) => (
             <li
               key={p.id}
               className={`flex items-center justify-between rounded-lg border px-4 py-3 ${
@@ -159,20 +205,167 @@ function PlayerLobby({
         </ul>
       </div>
 
-      {/* Start button (captain only) */}
-      {isCaptain ? (
+      {state.canStartGame ? (
         <button
           onClick={onStartGame}
-          disabled={!canStartGame}
-          className="w-full max-w-sm rounded-lg bg-green-600 py-4 text-lg font-bold text-white transition hover:bg-green-500 disabled:opacity-50"
+          className="w-full max-w-sm rounded-lg bg-green-600 py-4 text-lg font-bold text-white transition hover:bg-green-500"
         >
           Start Game
         </button>
+      ) : state.isCaptain ? (
+        <p className="text-slate-500">Need at least 2 players to start</p>
       ) : (
         <p className="text-slate-500">
           Waiting for the captain to start the game...
         </p>
       )}
+    </div>
+  );
+}
+
+// ── Round Intro ─────────────────────────────────────────────
+
+function RoundIntroView({ state }: { state: ReturnType<typeof usePlayerStore.getState> }) {
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center gap-6 text-center">
+      <p className="text-sm uppercase tracking-widest text-slate-500">
+        Round {state.currentRound} of {state.totalRounds}
+      </p>
+      <h1 className="text-2xl font-bold text-amber-400">{state.category}</h1>
+      <p className="text-lg text-white">{state.question}</p>
+    </div>
+  );
+}
+
+// ── Captain Pick ────────────────────────────────────────────
+
+function CaptainPickView({
+  state,
+  onPick,
+}: {
+  state: ReturnType<typeof usePlayerStore.getState>;
+  onPick: (playerId: string) => void;
+}) {
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center gap-6">
+      <div className="text-center">
+        <p className="text-sm uppercase tracking-widest text-slate-500">
+          Round {state.currentRound}
+        </p>
+        <h2 className="mt-2 text-xl font-bold text-white">{state.category}</h2>
+        <p className="mt-1 text-slate-400">{state.question}</p>
+      </div>
+
+      <p className="text-lg text-amber-300">Choose a player for this round:</p>
+
+      <div className="w-full max-w-sm space-y-3">
+        {state.availablePlayers.map((p) => (
+          <button
+            key={p.id}
+            onClick={() => onPick(p.id)}
+            className="w-full rounded-lg border border-slate-600 bg-slate-900 px-6 py-4 text-lg font-medium text-white transition hover:border-amber-500 hover:bg-amber-500/10"
+          >
+            {p.name}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Active Player ───────────────────────────────────────────
+
+function ActivePlayerView({
+  state,
+  socket,
+  timerSeconds,
+}: {
+  state: ReturnType<typeof usePlayerStore.getState>;
+  socket: ReturnType<typeof useSocket>["socket"];
+  timerSeconds: number | null;
+}) {
+  return (
+    <div className="flex flex-1 flex-col justify-center gap-6">
+      <div className="text-center">
+        <p className="text-sm uppercase tracking-widest text-amber-400">
+          Your Turn!
+        </p>
+        <p className="mt-1 text-lg text-white">{state.question}</p>
+      </div>
+
+      <AnswerInput
+        onSubmit={(answer) => socket.emit("submit_answer", { answer })}
+        onBank={() => socket.emit("bank_money")}
+        canBank={state.canBank}
+        correctCount={state.correctCount}
+        moneyLevel={state.moneyLevel}
+        hasLife={state.hasLife}
+        timerSeconds={timerSeconds}
+      />
+    </div>
+  );
+}
+
+// ── Round End ───────────────────────────────────────────────
+
+function RoundEndView({
+  state,
+  onContinue,
+}: {
+  state: ReturnType<typeof usePlayerStore.getState>;
+  onContinue: () => void;
+}) {
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center gap-6 text-center">
+      <p className="text-sm uppercase tracking-widest text-slate-500">
+        Round Complete
+      </p>
+      <p className="text-2xl font-bold text-white">
+        Prize Pot:{" "}
+        <span className="text-amber-400">
+          {"\u00A3"}{state.prizePot.toLocaleString()}
+        </span>
+      </p>
+      <p
+        className={`text-sm ${
+          state.myStatus === "qualified"
+            ? "text-green-400"
+            : state.myStatus === "eliminated"
+              ? "text-red-400"
+              : "text-slate-400"
+        }`}
+      >
+        {state.myStatus === "qualified"
+          ? "You qualified for the Final!"
+          : state.myStatus === "eliminated"
+            ? "You have been eliminated"
+            : "Waiting for next round..."}
+      </p>
+
+      {state.isCaptain && (
+        <button
+          onClick={onContinue}
+          className="mt-4 rounded-lg bg-amber-500 px-8 py-4 text-lg font-bold text-slate-950 transition hover:bg-amber-400"
+        >
+          Continue
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ── Game Over ───────────────────────────────────────────────
+
+function GameOverView({ state }: { state: ReturnType<typeof usePlayerStore.getState> }) {
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center gap-6 text-center">
+      <h1 className="text-4xl font-black text-amber-400">GAME OVER</h1>
+      <p className="text-xl text-white">
+        Total Prize:{" "}
+        <span className="font-bold text-amber-400">
+          {"\u00A3"}{state.prizePot.toLocaleString()}
+        </span>
+      </p>
     </div>
   );
 }
