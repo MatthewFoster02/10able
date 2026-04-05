@@ -61,6 +61,14 @@ export interface GameContext {
 
   // Round order
   playOrder: string[];
+
+  // Final round
+  finalVoteOptions: [QuestionData, QuestionData] | null;
+  finalVotes: Record<string, number>; // playerId -> 0 or 1
+  finalTurnOrder: string[]; // playerIds in turn order
+  finalCurrentTurnIndex: number;
+  gameWon: boolean;
+  gameResult: { won: boolean; prizeAmount: number; winners: string[] } | null;
 }
 
 // ── Events ───────────────────────────────────────────────────
@@ -86,7 +94,15 @@ export type GameEvent =
   | { type: "SKIP_OVERRULE" }
   // Reinstatement
   | { type: "REINSTATE_PLAYER"; playerId: string }
-  | { type: "CONTINUE_WITHOUT_REINSTATE" };
+  | { type: "CONTINUE_WITHOUT_REINSTATE" }
+  // Final round
+  | { type: "VOTE_CATEGORY"; playerId: string; categoryIndex: number }
+  | { type: "VOTE_TIMER_EXPIRED" }
+  | { type: "START_FINAL" }
+  | { type: "FINAL_VALIDATED_CORRECT"; position: number; answerText: string }
+  | { type: "FINAL_VALIDATED_WRONG" }
+  | { type: "FINAL_VALIDATED_ALREADY_FOUND" }
+  | { type: "FINAL_TIMER_EXPIRED" };
 
 // ── Helper functions ─────────────────────────────────────────
 
@@ -419,6 +435,142 @@ export const gameMachine = setup({
     continueWithoutReinstate: assign(() => ({
       timerDeadline: Date.now() + ANSWER_TIMEOUT_SECONDS * 1000,
     })),
+
+    // ── Final round actions ─────────────────────────────────
+    setupFinalVote: assign(({ context }) => {
+      // Pick 2 random questions for voting
+      const available = getRandomQuestion(context.usedQuestionIds);
+      const available2 = getRandomQuestion([...context.usedQuestionIds, available?.id ?? ""]);
+      if (!available || !available2) throw new Error("Not enough questions for final vote");
+
+      return {
+        finalVoteOptions: [available, available2] as [QuestionData, QuestionData],
+        finalVotes: {},
+        timerDeadline: Date.now() + 60 * 1000, // 60 second vote
+      };
+    }),
+
+    recordVote: assign(({ context, event }) => {
+      if (event.type !== "VOTE_CATEGORY") return {};
+      return {
+        finalVotes: { ...context.finalVotes, [event.playerId]: event.categoryIndex },
+      };
+    }),
+
+    resolveFinalVote: assign(({ context }) => {
+      if (!context.finalVoteOptions) return {};
+
+      // Count votes
+      let count0 = 0;
+      let count1 = 0;
+      for (const vote of Object.values(context.finalVotes)) {
+        if (vote === 0) count0++;
+        else count1++;
+      }
+
+      // Tie = captain's choice wins
+      const captain = getCaptain(context.players);
+      let chosenIndex = count0 >= count1 ? 0 : 1;
+      if (count0 === count1 && captain) {
+        const captainVote = context.finalVotes[captain.id];
+        if (captainVote !== undefined) {
+          chosenIndex = captainVote;
+        }
+      }
+
+      const chosenQuestion = context.finalVoteOptions[chosenIndex];
+
+      // Build turn order: captain first, then others in round order
+      const qualified = context.players.filter(
+        (p) => p.status === "qualified" || p.status === "reinstated" || p.isCaptain
+      );
+      const captainPlayer = qualified.find((p) => p.isCaptain);
+      const others = qualified
+        .filter((p) => !p.isCaptain)
+        .sort((a, b) => (a.roundPlayed ?? 0) - (b.roundPlayed ?? 0));
+      const turnOrder = [
+        ...(captainPlayer ? [captainPlayer.id] : []),
+        ...others.map((p) => p.id),
+      ];
+
+      return {
+        currentQuestion: chosenQuestion,
+        board: createEmptyBoard(),
+        revealedPositions: new Set<number>(),
+        correctCount: 0,
+        finalTurnOrder: turnOrder,
+        finalCurrentTurnIndex: 0,
+        activePlayerId: turnOrder[0] ?? null,
+        timerDeadline: Date.now() + ANSWER_TIMEOUT_SECONDS * 1000,
+        usedQuestionIds: [...context.usedQuestionIds, chosenQuestion.id],
+      };
+    }),
+
+    advanceFinalTurn: assign(({ context }) => {
+      // Find next non-eliminated player
+      let nextIndex = context.finalCurrentTurnIndex + 1;
+      while (nextIndex < context.finalTurnOrder.length) {
+        const pid = context.finalTurnOrder[nextIndex];
+        const player = context.players.find((p) => p.id === pid);
+        if (player && player.status !== "eliminated_final") break;
+        nextIndex++;
+      }
+      // Wrap around
+      if (nextIndex >= context.finalTurnOrder.length) {
+        nextIndex = 0;
+        while (nextIndex < context.finalTurnOrder.length) {
+          const pid = context.finalTurnOrder[nextIndex];
+          const player = context.players.find((p) => p.id === pid);
+          if (player && player.status !== "eliminated_final") break;
+          nextIndex++;
+        }
+      }
+      const nextPlayerId = context.finalTurnOrder[nextIndex] ?? null;
+      return {
+        finalCurrentTurnIndex: nextIndex,
+        activePlayerId: nextPlayerId,
+        timerDeadline: Date.now() + ANSWER_TIMEOUT_SECONDS * 1000,
+      };
+    }),
+
+    processFinalCorrect: assign(({ context, event }) => {
+      if (event.type !== "FINAL_VALIDATED_CORRECT") return {};
+      const newRevealed = new Set(context.revealedPositions);
+      newRevealed.add(event.position);
+      const newBoard = context.board.map((slot) =>
+        slot.position === event.position
+          ? { ...slot, answer: event.answerText, revealed: true, revealedByPlayer: context.activePlayerId }
+          : slot
+      );
+      return {
+        board: newBoard,
+        revealedPositions: newRevealed,
+        correctCount: context.correctCount + 1,
+      };
+    }),
+
+    eliminateFinalPlayer: assign(({ context }) => ({
+      players: context.players.map((p) =>
+        p.id === context.activePlayerId ? { ...p, status: "eliminated_final" as const } : p
+      ),
+      timerDeadline: null,
+    })),
+
+    setGameWon: assign(({ context }) => {
+      const winners = context.players
+        .filter((p) => p.status !== "eliminated" && p.status !== "eliminated_final")
+        .map((p) => p.name);
+      const prizeAmount = context.prizePot || 500;
+      return {
+        gameWon: true,
+        gameResult: { won: true, prizeAmount, winners },
+      };
+    }),
+
+    setGameLost: assign(({ context }) => ({
+      gameWon: false,
+      gameResult: { won: false, prizeAmount: 0, winners: [] },
+    })),
   },
 
   guards: {
@@ -458,6 +610,17 @@ export const gameMachine = setup({
     },
     isOverruleCorrect: ({ event }) =>
       event.type === "OVERRULE_VALIDATED_CORRECT",
+    allFinalAnswersFound: ({ context }) =>
+      context.correctCount >= ANSWERS_PER_LIST,
+    allFinalPlayersEliminated: ({ context }) => {
+      const alive = context.finalTurnOrder.filter((pid) => {
+        const p = context.players.find((pl) => pl.id === pid);
+        return p && p.status !== "eliminated_final";
+      });
+      return alive.length === 0;
+    },
+    hasQualifiedPlayers: ({ context }) =>
+      context.players.some((p) => p.status === "qualified" || p.status === "reinstated" || p.isCaptain),
   },
 }).createMachine({
   id: "tenable",
@@ -487,6 +650,12 @@ export const gameMachine = setup({
     roundHistory: [],
     timerDeadline: null,
     playOrder: [],
+    finalVoteOptions: null,
+    finalVotes: {},
+    finalTurnOrder: [],
+    finalCurrentTurnIndex: 0,
+    gameWon: false,
+    gameResult: null,
   }),
 
   states: {
@@ -756,9 +925,83 @@ export const gameMachine = setup({
       on: {
         CONTINUE_REVEAL: [
           { target: "roundIntro", guard: "hasMoreRounds", actions: ["advanceRound", "setupRound"] },
-          { target: "gameOver" },
+          { target: "finalVote", actions: ["setupFinalVote"] },
         ],
       },
+    },
+
+    // ── Final round states ──────────────────────────────────
+
+    finalVote: {
+      on: {
+        VOTE_CATEGORY: {
+          target: "finalVote",
+          actions: ["recordVote"],
+          reenter: true,
+        },
+        VOTE_TIMER_EXPIRED: {
+          target: "finalRound",
+          actions: ["resolveFinalVote"],
+        },
+        START_FINAL: {
+          target: "finalRound",
+          actions: ["resolveFinalVote"],
+        },
+      },
+    },
+
+    finalRound: {
+      on: {
+        FINAL_VALIDATED_CORRECT: [
+          {
+            target: "finalRoundWin",
+            guard: ({ context, event }) => {
+              if (event.type !== "FINAL_VALIDATED_CORRECT") return false;
+              return context.correctCount + 1 >= ANSWERS_PER_LIST;
+            },
+            actions: ["processFinalCorrect"],
+          },
+          {
+            target: "finalTurnAdvance",
+            actions: ["processFinalCorrect"],
+          },
+        ],
+        FINAL_VALIDATED_WRONG: {
+          target: "finalElimination",
+          actions: ["eliminateFinalPlayer"],
+        },
+        FINAL_VALIDATED_ALREADY_FOUND: {
+          target: "finalRound",
+          reenter: true,
+        },
+        FINAL_TIMER_EXPIRED: {
+          target: "finalElimination",
+          actions: ["eliminateFinalPlayer"],
+        },
+      },
+    },
+
+    finalTurnAdvance: {
+      always: [
+        { target: "finalRound", actions: ["advanceFinalTurn"] },
+      ],
+    },
+
+    finalElimination: {
+      always: [
+        { target: "finalRoundLose", guard: "allFinalPlayersEliminated" },
+        { target: "finalRound", actions: ["advanceFinalTurn"] },
+      ],
+    },
+
+    finalRoundWin: {
+      entry: ["setGameWon"],
+      type: "final",
+    },
+
+    finalRoundLose: {
+      entry: ["setGameLost"],
+      type: "final",
     },
 
     gameOver: {

@@ -207,7 +207,15 @@ export function registerHandlers(io: AppServer): void {
       if (!ctx.currentQuestion) return;
 
       const answer = parsed.data.answer;
-      console.log(`[Room ${room.code}] Answer submitted: "${answer}" by ${socket.data.playerId}`);
+      const gameState = getGameState(room);
+      const isFinal = gameState === "finalRound";
+
+      console.log(`[Room ${room.code}] Answer submitted: "${answer}" by ${socket.data.playerId} (${isFinal ? "final" : "regular"})`);
+
+      // Determine event type prefixes
+      const correctType = isFinal ? "FINAL_VALIDATED_CORRECT" as const : "VALIDATED_CORRECT" as const;
+      const wrongType = isFinal ? "FINAL_VALIDATED_WRONG" as const : "VALIDATED_WRONG" as const;
+      const alreadyFoundType = isFinal ? "FINAL_VALIDATED_ALREADY_FOUND" as const : "VALIDATED_ALREADY_FOUND" as const;
 
       // Tier 1: Local match
       const localResult = checkAnswerLocal(
@@ -218,15 +226,15 @@ export function registerHandlers(io: AppServer): void {
 
       if (localResult.match) {
         room.gameActor.send({
-          type: "VALIDATED_CORRECT",
+          type: correctType,
           position: localResult.position,
           answerText: localResult.answerText,
-        });
+        } as any);
         return;
       }
 
       if (localResult.alreadyFound) {
-        room.gameActor.send({ type: "VALIDATED_ALREADY_FOUND" });
+        room.gameActor.send({ type: alreadyFoundType } as any);
         return;
       }
 
@@ -245,12 +253,12 @@ export function registerHandlers(io: AppServer): void {
 
       if (aiResult.match && aiResult.position !== null && aiResult.answerText) {
         room.gameActor.send({
-          type: "VALIDATED_CORRECT",
+          type: correctType,
           position: aiResult.position,
           answerText: aiResult.answerText,
-        });
+        } as any);
       } else {
-        room.gameActor.send({ type: "VALIDATED_WRONG" });
+        room.gameActor.send({ type: wrongType } as any);
       }
     });
 
@@ -452,6 +460,34 @@ export function registerHandlers(io: AppServer): void {
       room.gameActor.send({ type: "CONTINUE_WITHOUT_REINSTATE" });
     });
 
+    // ── Final round vote ──────────────────────────────────────
+    socket.on("vote_final_category", (data) => {
+      const room = getPlayerRoom(socket);
+      if (!room?.gameActor) return;
+
+      const ctx = getGameContext(room);
+      if (!ctx) return;
+
+      const categoryIndex = data.categoryIndex;
+      if (categoryIndex !== 0 && categoryIndex !== 1) return;
+
+      room.gameActor.send({
+        type: "VOTE_CATEGORY",
+        playerId: socket.data.playerId!,
+        categoryIndex,
+      });
+
+      // Check if all qualified players have voted
+      const qualified = ctx.players.filter(
+        (p) => p.status === "qualified" || p.status === "reinstated" || p.isCaptain
+      );
+      const newVotes = { ...ctx.finalVotes, [socket.data.playerId!]: categoryIndex };
+      if (Object.keys(newVotes).length >= qualified.length) {
+        room.gameActor.send({ type: "START_FINAL" });
+        startTimerSync(io, room);
+      }
+    });
+
     // ── Continue from round end ───────────────────────────────
     socket.on("continue_reveal", () => {
       const room = getPlayerRoom(socket);
@@ -541,7 +577,16 @@ function startTimerSync(io: AppServer, room: Room): void {
         room.timerInterval = null;
       }
       if (room.gameActor) {
-        room.gameActor.send({ type: "TIMER_EXPIRED" });
+        const gameState = getGameState(room);
+        const isFinal = gameState === "finalRound";
+        const isVote = gameState === "finalVote";
+        if (isVote) {
+          room.gameActor.send({ type: "VOTE_TIMER_EXPIRED" });
+        } else if (isFinal) {
+          room.gameActor.send({ type: "FINAL_TIMER_EXPIRED" });
+        } else {
+          room.gameActor.send({ type: "TIMER_EXPIRED" });
+        }
       }
     }
   }, 1000);

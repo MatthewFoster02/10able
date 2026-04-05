@@ -67,6 +67,10 @@ function RoomView({ roomCode }: { roomCode: string }) {
       return <ActiveRoundDisplay state={state} socket={socket} />;
     case "round_end":
       return <RoundEndDisplay state={state} socket={socket} roomCode={roomCode} />;
+    case "final_vote":
+      return <FinalVoteDisplay state={state} />;
+    case "final_round":
+      return <FinalRoundDisplay state={state} socket={socket} />;
     case "game_over":
       return <GameOverDisplay state={state} />;
     default:
@@ -356,12 +360,139 @@ function RoundEndDisplay({
   );
 }
 
+// ── Final Vote ──────────────────────────────────────────────
+
+function FinalVoteDisplay({ state }: { state: ReturnType<typeof useRoomStore.getState> }) {
+  if (!state.finalVote) return null;
+
+  return (
+    <div className="flex min-h-screen flex-col items-center justify-center gap-8">
+      <p className="text-sm uppercase tracking-widest text-slate-500">
+        The Final Round
+      </p>
+      <h2 className="text-3xl font-bold text-white">Choose a Category</h2>
+
+      <div className="flex gap-6">
+        {state.finalVote.options.map((option, i) => {
+          const voteCount = Object.values(state.finalVote!.votes).filter((v) => v === i).length;
+          return (
+            <div
+              key={i}
+              className="flex flex-col items-center gap-3 rounded-xl border border-amber-500/30 bg-amber-500/5 px-12 py-8"
+            >
+              <p className="text-2xl font-bold text-amber-400">{option}</p>
+              <p className="text-4xl font-black text-white">{voteCount}</p>
+              <p className="text-sm text-slate-500">votes</p>
+            </div>
+          );
+        })}
+      </div>
+
+      <Timer socket={useSocket().socket} initialSeconds={state.timerSeconds} />
+      <PlayerList players={state.players} activePlayerId={null} />
+    </div>
+  );
+}
+
+// ── Final Round ─────────────────────────────────────────────
+
+function FinalRoundDisplay({
+  state,
+  socket,
+}: {
+  state: ReturnType<typeof useRoomStore.getState>;
+  socket: ReturnType<typeof useSocket>["socket"];
+}) {
+  // Show turn order
+  const turnOrderPlayers = state.finalTurnOrder.map((pid) =>
+    state.players.find((p) => p.id === pid)
+  ).filter(Boolean);
+
+  return (
+    <div className="flex min-h-screen flex-col">
+      {/* Top bar */}
+      <div className="flex items-center justify-between border-b border-slate-800 px-6 py-3">
+        <div className="text-sm">
+          <span className="text-red-400 font-semibold">THE FINAL</span>
+        </div>
+        <div className="text-right">
+          <span className="text-sm text-slate-500">Playing for: </span>
+          <span className="text-lg font-bold text-amber-400">
+            {"\u00A3"}{state.prizePot.toLocaleString()}
+          </span>
+        </div>
+      </div>
+
+      {/* Main content */}
+      <div className="flex flex-1 items-start justify-center gap-8 px-8 pt-6">
+        <div className="flex-1">
+          <Board board={state.board} question={state.question} />
+        </div>
+
+        <div className="flex w-64 flex-col gap-6">
+          <div className="text-center">
+            <p className="text-xs uppercase tracking-wider text-slate-500">Now Playing</p>
+            <p className="mt-1 text-xl font-bold text-white">{state.activePlayerName}</p>
+          </div>
+
+          <Timer socket={socket} initialSeconds={state.timerSeconds} />
+
+          {/* Turn order */}
+          <div>
+            <h3 className="mb-2 text-center text-xs font-semibold uppercase tracking-wider text-slate-500">
+              Turn Order
+            </h3>
+            <div className="space-y-1">
+              {turnOrderPlayers.map((p) => {
+                if (!p) return null;
+                const isActive = p.id === state.activePlayerId;
+                const isOut = p.status === "eliminated_final";
+                return (
+                  <div
+                    key={p.id}
+                    className={`rounded px-3 py-1.5 text-sm font-medium ${
+                      isActive
+                        ? "bg-amber-500/20 text-amber-300"
+                        : isOut
+                          ? "text-slate-700 line-through"
+                          : "text-slate-400"
+                    }`}
+                  >
+                    {p.name}
+                    {isActive && " \u25C0"}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-slate-700 bg-slate-900 p-4 text-center">
+            <p className="text-3xl font-black text-white">
+              {state.currentRoundCorrectCount}
+            </p>
+            <p className="text-xs text-slate-500">Correct Answers</p>
+          </div>
+        </div>
+      </div>
+
+      {/* Bottom: Player status bar */}
+      <div className="border-t border-slate-800 px-6 py-4">
+        <PlayerList players={state.players} activePlayerId={state.activePlayerId} />
+      </div>
+    </div>
+  );
+}
+
 // ── Game Over ───────────────────────────────────────────────
 
 function GameOverDisplay({ state }: { state: ReturnType<typeof useRoomStore.getState> }) {
   return (
     <div className="flex min-h-screen flex-col items-center justify-center gap-8">
       <h1 className="text-5xl font-black text-amber-400">GAME OVER</h1>
+
+      {state.message && (
+        <p className="text-2xl font-bold text-white">{state.message}</p>
+      )}
 
       <div className="text-center">
         <p className="text-2xl text-white">

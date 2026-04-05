@@ -222,6 +222,12 @@ function mapStateToPhase(state: string): GamePhase {
     captainNominateResponse: "captain_round",
     reinstatementOffer: "captain_round",
     roundEnd: "round_end",
+    finalVote: "final_vote",
+    finalRound: "final_round",
+    finalTurnAdvance: "final_round",
+    finalElimination: "final_round",
+    finalRoundWin: "game_over",
+    finalRoundLose: "game_over",
     gameOver: "game_over",
   };
   return mapping[state] ?? "lobby";
@@ -266,11 +272,21 @@ export function buildRoomStateFromGame(room: Room): RoomState {
     overruleUsedThisRound: ctx.overruleUsedThisRound,
     activePlayerHasLife: ctx.activePlayerHasLife,
     timerSeconds,
-    finalVote: null,
-    finalTurnOrder: [],
-    finalCurrentTurnIndex: 0,
+    finalVote: ctx.finalVoteOptions
+      ? {
+          options: [ctx.finalVoteOptions[0].category, ctx.finalVoteOptions[1].category] as [string, string],
+          votes: ctx.finalVotes,
+          deadline: ctx.timerDeadline ?? 0,
+        }
+      : null,
+    finalTurnOrder: ctx.finalTurnOrder,
+    finalCurrentTurnIndex: ctx.finalCurrentTurnIndex,
     roundHistory: ctx.roundHistory,
-    message: null,
+    message: ctx.gameResult
+      ? ctx.gameResult.won
+        ? `Congratulations! You won \u00A3${ctx.gameResult.prizeAmount.toLocaleString()}!`
+        : "All players eliminated. You win nothing."
+      : null,
   };
 }
 
@@ -323,8 +339,9 @@ export function buildPlayerStateFromGame(room: Room, playerId: string): PlayerSt
   const isMyTurn = ctx.activePlayerId === playerId;
   const isCaptain = player?.isCaptain ?? false;
 
-  const isPlayerTurnState = ["playerTurn", "captainRound"].includes(state);
+  const isPlayerTurnState = ["playerTurn", "captainRound", "finalRound"].includes(state);
   const isNominateState = ["nominateWaiting", "nominateResponse", "captainNominateWaiting", "captainNominateResponse"].includes(state);
+  const isFinalVoteState = state === "finalVote";
 
   const timerSeconds = ctx.timerDeadline
     ? Math.max(0, Math.ceil((ctx.timerDeadline - Date.now()) / 1000))
@@ -389,8 +406,16 @@ export function buildPlayerStateFromGame(room: Room, playerId: string): PlayerSt
     prizePot: ctx.prizePot,
     players: ctx.players,
     timerSeconds,
-    finalVoteOptions: null,
-    hasVoted: false,
-    message: isNominated ? "You've been nominated! Submit a suggestion." : null,
+    finalVoteOptions: isFinalVoteState && ctx.finalVoteOptions
+      ? [ctx.finalVoteOptions[0].category, ctx.finalVoteOptions[1].category] as [string, string]
+      : null,
+    hasVoted: isFinalVoteState && ctx.finalVotes[playerId] !== undefined,
+    message: isNominated
+      ? "You've been nominated! Submit a suggestion."
+      : ctx.gameResult
+        ? ctx.gameResult.won
+          ? `You won \u00A3${ctx.gameResult.prizeAmount.toLocaleString()}!`
+          : "All players eliminated. You win nothing."
+        : null,
   };
 }

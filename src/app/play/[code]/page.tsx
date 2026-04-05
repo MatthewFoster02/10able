@@ -186,6 +186,26 @@ function PlayerView({
         />
       );
 
+    case "final_vote":
+      return (
+        <FinalVoteView
+          state={state}
+          onVote={(categoryIndex) => socket.emit("vote_final_category", { categoryIndex })}
+        />
+      );
+
+    case "final_round":
+      if (state.canSubmitAnswer && state.isMyTurn) {
+        return (
+          <FinalRoundPlayerView
+            state={state}
+            socket={socket}
+            timerSeconds={timerSeconds}
+          />
+        );
+      }
+      return <SpectatorView state={state} />;
+
     case "game_over":
       return <GameOverView state={state} />;
 
@@ -423,12 +443,91 @@ function RoundEndView({
   );
 }
 
+// ── Final Vote ──────────────────────────────────────────────
+
+function FinalVoteView({
+  state,
+  onVote,
+}: {
+  state: ReturnType<typeof usePlayerStore.getState>;
+  onVote: (categoryIndex: number) => void;
+}) {
+  if (!state.finalVoteOptions) return <SpectatorView state={state} />;
+
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center gap-6">
+      <p className="text-sm uppercase tracking-widest text-slate-500">
+        The Final Round
+      </p>
+      <p className="text-lg text-white">Vote for a category:</p>
+      <div className="flex w-full max-w-sm flex-col gap-3">
+        {state.finalVoteOptions.map((category, i) => (
+          <button
+            key={i}
+            onClick={() => onVote(i)}
+            disabled={state.hasVoted}
+            className={`rounded-lg border px-6 py-5 text-lg font-semibold transition ${
+              state.hasVoted
+                ? "border-slate-700 bg-slate-900 text-slate-500"
+                : "border-amber-500/50 bg-amber-500/10 text-white hover:bg-amber-500/20"
+            }`}
+          >
+            {category}
+          </button>
+        ))}
+      </div>
+      {state.hasVoted && (
+        <p className="text-sm text-slate-500">Vote submitted. Waiting for others...</p>
+      )}
+    </div>
+  );
+}
+
+// ── Final Round Player ──────────────────────────────────────
+
+function FinalRoundPlayerView({
+  state,
+  socket,
+  timerSeconds,
+}: {
+  state: ReturnType<typeof usePlayerStore.getState>;
+  socket: ReturnType<typeof useSocket>["socket"];
+  timerSeconds: number | null;
+}) {
+  return (
+    <div className="flex flex-1 flex-col justify-center gap-6">
+      <div className="text-center">
+        <p className="text-sm uppercase tracking-widest text-red-400">
+          Final Round — Your Turn!
+        </p>
+        <p className="mt-1 text-lg text-white">{state.question}</p>
+        <p className="mt-1 text-xs text-slate-500">
+          One wrong answer and you are out!
+        </p>
+      </div>
+
+      <AnswerInput
+        onSubmit={(answer) => socket.emit("submit_answer", { answer })}
+        onBank={() => {}}
+        canBank={false}
+        correctCount={state.correctCount}
+        moneyLevel={state.prizePot}
+        hasLife={false}
+        timerSeconds={timerSeconds}
+      />
+    </div>
+  );
+}
+
 // ── Game Over ───────────────────────────────────────────────
 
 function GameOverView({ state }: { state: ReturnType<typeof usePlayerStore.getState> }) {
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-6 text-center">
       <h1 className="text-4xl font-black text-amber-400">GAME OVER</h1>
+      {state.message && (
+        <p className="text-xl text-white">{state.message}</p>
+      )}
       <p className="text-xl text-white">
         Total Prize:{" "}
         <span className="font-bold text-amber-400">
