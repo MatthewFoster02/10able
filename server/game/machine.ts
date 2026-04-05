@@ -76,8 +76,10 @@ export interface GameContext {
 export type GameEvent =
   | { type: "START_GAME" }
   | { type: "CAPTAIN_PICK"; playerId: string }
+  | { type: "ANSWER_PENDING"; answer: string }
   | { type: "BANK" }
   | { type: "TIMER_EXPIRED" }
+  | { type: "OVERRULE_TIMEOUT" }
   | { type: "CONTINUE_REVEAL" }
   | { type: "VALIDATED_CORRECT"; position: number; answerText: string }
   | { type: "VALIDATED_WRONG" }
@@ -196,6 +198,7 @@ export const gameMachine = setup({
       );
       return {
         activePlayerId: playerId,
+        activePlayerHasLife: true,
         players,
         playOrder: [...context.playOrder, playerId],
         timerDeadline: Date.now() + ANSWER_TIMEOUT_SECONDS * 1000,
@@ -210,6 +213,7 @@ export const gameMachine = setup({
       );
       return {
         activePlayerId: captain.id,
+        activePlayerHasLife: true,
         players,
         reinstatedPlayerIds: [],
         timerDeadline: Date.now() + ANSWER_TIMEOUT_SECONDS * 1000,
@@ -436,6 +440,19 @@ export const gameMachine = setup({
       timerDeadline: Date.now() + ANSWER_TIMEOUT_SECONDS * 1000,
     })),
 
+    storePendingAnswer: assign(({ context, event }) => {
+      if (event.type !== "ANSWER_PENDING") return {};
+      return {
+        pendingAnswer: event.answer,
+        overruleActive: true,
+      };
+    }),
+
+    clearPendingAnswer: assign(() => ({
+      pendingAnswer: null,
+      overruleActive: false,
+    })),
+
     // ── Final round actions ─────────────────────────────────
     setupFinalVote: assign(({ context }) => {
       // Pick 2 random questions for voting
@@ -569,6 +586,7 @@ export const gameMachine = setup({
 
     setGameLost: assign(({ context }) => ({
       gameWon: false,
+      prizePot: 0,
       gameResult: { won: false, prizeAmount: 0, winners: [] },
     })),
   },
@@ -691,6 +709,12 @@ export const gameMachine = setup({
 
     playerTurn: {
       on: {
+        ANSWER_PENDING: {
+          // Non-captain round + overrule available → pause for captain
+          guard: "canOverrule",
+          target: "overruleWindow",
+          actions: ["storePendingAnswer"],
+        },
         VALIDATED_ALREADY_FOUND: {
           target: "playerTurn",
           actions: ["processValidatedAlreadyFound"],
@@ -773,19 +797,24 @@ export const gameMachine = setup({
     // ── Overrule states ─────────────────────────────────────
 
     overruleWindow: {
-      // Brief window for captain to overrule (entered from handler, not machine)
-      // The handler will send USE_OVERRULE or SKIP_OVERRULE
+      // 5-second window for captain to overrule before answer is validated
+      // The pending answer is stored in context.pendingAnswer
+      // OVERRULE_TIMEOUT or SKIP_OVERRULE: validate the pending answer (handler does this)
+      // VALIDATED_* events come from the handler after validating the pending answer
       on: {
         USE_OVERRULE: {
           target: "overruleInput",
         },
-        SKIP_OVERRULE: [
-          // Original answer was wrong, process it
-          { target: "answerResult", actions: ["processValidatedWrong"] },
-        ],
-        TIMER_EXPIRED: [
-          { target: "answerResult", actions: ["processValidatedWrong"] },
-        ],
+        OVERRULE_TIMEOUT: {
+          // Captain didn't overrule — validate the pending answer
+          // The handler will validate and send VALIDATED_* events to playerTurn
+          target: "playerTurn",
+          actions: ["clearPendingAnswer"],
+        },
+        SKIP_OVERRULE: {
+          target: "playerTurn",
+          actions: ["clearPendingAnswer"],
+        },
       },
     },
 

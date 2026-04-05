@@ -370,11 +370,16 @@ export function buildPlayerStateFromGame(room: Room, playerId: string): PlayerSt
     ctx.nominatesRemaining > 0 && ctx.correctCount < 5;
   const canOverrule = isCaptain && !isMyTurn &&
     !ctx.overruleUsedThisRound && ctx.correctCount < 5 &&
-    ctx.currentRound !== ctx.totalRounds;
+    ctx.currentRound !== ctx.totalRounds &&
+    state === "overruleWindow";
   const canReinstate = isCaptain && state === "reinstatementOffer";
 
-  // Is the nominated player this player?
-  const isNominated = ctx.nominateTargetId === playerId && isNominateState;
+  // Is the nominated player this player? Only in the "waiting" states (before they submit)
+  const isNominatedWaiting = ctx.nominateTargetId === playerId &&
+    ["nominateWaiting", "captainNominateWaiting"].includes(state);
+  // Is the active player reviewing a nominate suggestion?
+  const isReviewingNominate = isMyTurn &&
+    ["nominateResponse", "captainNominateResponse"].includes(state);
 
   return {
     phase,
@@ -392,7 +397,7 @@ export function buildPlayerStateFromGame(room: Room, playerId: string): PlayerSt
     correctCount: isMyTurn ? ctx.correctCount : 0,
     moneyLevel: isMyTurn ? (ctx.moneyLadder[ctx.correctCount] ?? 0) : 0,
     hasLife: isMyTurn ? ctx.activePlayerHasLife : false,
-    canSubmitAnswer: (isMyTurn && isPlayerTurnState) || isNominated,
+    canSubmitAnswer: (isMyTurn && (isPlayerTurnState || isReviewingNominate)) || isNominatedWaiting,
     canBank: isMyTurn && isPlayerTurnState && ctx.correctCount >= 5,
     canNominate,
     canOverrule,
@@ -401,7 +406,7 @@ export function buildPlayerStateFromGame(room: Room, playerId: string): PlayerSt
     canReinstate,
     availablePlayers,
     eliminatedPlayers,
-    nominateSuggestion: isMyTurn ? ctx.nominateSuggestion : null,
+    nominateSuggestion: isReviewingNominate ? ctx.nominateSuggestion : null,
     overrulePlayerAnswer: isCaptain && state === "overruleWindow" ? ctx.pendingAnswer : null,
     prizePot: ctx.prizePot,
     players: ctx.players,
@@ -410,7 +415,7 @@ export function buildPlayerStateFromGame(room: Room, playerId: string): PlayerSt
       ? [ctx.finalVoteOptions[0].category, ctx.finalVoteOptions[1].category] as [string, string]
       : null,
     hasVoted: isFinalVoteState && ctx.finalVotes[playerId] !== undefined,
-    message: isNominated
+    message: isNominatedWaiting
       ? "You've been nominated! Submit a suggestion."
       : ctx.gameResult
         ? ctx.gameResult.won

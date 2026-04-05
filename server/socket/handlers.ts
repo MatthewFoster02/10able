@@ -34,7 +34,7 @@ import {
   getGameState,
   type Room,
 } from "../game/rooms";
-import { ANSWER_TIMEOUT_SECONDS } from "../../shared/constants";
+import { ANSWER_TIMEOUT_SECONDS, OVERRULE_WINDOW_SECONDS } from "../../shared/constants";
 import { checkAnswerLocal } from "../services/questions";
 import { checkAnswerWithOpenAI } from "../services/openai";
 import { generateAnswerAudio, generateWrongAnswerAudio } from "../services/elevenlabs";
@@ -128,11 +128,9 @@ export function registerHandlers(io: AppServer): void {
         io.to(room.code).emit("player_joined", { player: result.player });
       }
 
-      // Broadcast updated state
+      // Broadcast updated state to all
       broadcastState(io, room);
-
-      // Send targeted player state
-      socket.emit("player_state", buildPlayerStateFromGame(room, result.player.id));
+      broadcastPlayerStates(io, room);
     });
 
     // ── Start game (captain only) ───────────────────────────
@@ -210,68 +208,39 @@ export function registerHandlers(io: AppServer): void {
       const answer = parsed.data.answer;
       const gameState = getGameState(room);
       const isFinal = gameState === "finalRound";
+      const isNonCaptainRound = gameState === "playerTurn";
 
-      console.log(`[Room ${room.code}] Answer submitted: "${answer}" by ${socket.data.playerId} (${isFinal ? "final" : "regular"})`);
+      console.log(`[Room ${room.code}] Answer submitted: "${answer}" by ${socket.data.playerId}`);
 
-      // Determine event type prefixes
-      const correctType = isFinal ? "FINAL_VALIDATED_CORRECT" as const : "VALIDATED_CORRECT" as const;
-      const wrongType = isFinal ? "FINAL_VALIDATED_WRONG" as const : "VALIDATED_WRONG" as const;
-      const alreadyFoundType = isFinal ? "FINAL_VALIDATED_ALREADY_FOUND" as const : "VALIDATED_ALREADY_FOUND" as const;
-
-      // Tier 1: Local match
-      const localResult = checkAnswerLocal(
-        answer,
-        ctx.currentQuestion.answers,
-        ctx.revealedPositions
-      );
-
-      if (localResult.match) {
-        room.gameActor.send({
-          type: correctType,
-          position: localResult.position,
-          answerText: localResult.answerText,
-        } as any);
-        // Generate and play audio for correct answer (fire-and-forget)
-        generateAnswerAudio(localResult.position, localResult.answerText).then((audio) => {
-          if (audio) io.to(room.code).emit("play_audio", { url: audio });
-        });
-        return;
-      }
-
-      if (localResult.alreadyFound) {
+      // Check for "already found" first (no overrule window needed)
+      const localResult = checkAnswerLocal(answer, ctx.currentQuestion.answers, ctx.revealedPositions);
+      if (!localResult.match && localResult.alreadyFound) {
+        const alreadyFoundType = isFinal ? "FINAL_VALIDATED_ALREADY_FOUND" as const : "VALIDATED_ALREADY_FOUND" as const;
         room.gameActor.send({ type: alreadyFoundType } as any);
         return;
       }
 
-      // Tier 2: OpenAI fuzzy match
-      const remainingAnswers = ctx.currentQuestion.answers.filter(
-        (a) => !ctx.revealedPositions.has(a.position)
-      );
+      // For non-captain individual rounds with overrule available: pause for overrule window
+      const canOverrule = isNonCaptainRound && !ctx.overruleUsedThisRound && ctx.correctCount < 5;
+      if (canOverrule) {
+        // Store the pending answer and enter overrule window
+        room.gameActor.send({ type: "ANSWER_PENDING", answer });
 
-      const aiResult = await checkAnswerWithOpenAI(
-        answer,
-        ctx.currentQuestion.category,
-        ctx.currentQuestion.question,
-        remainingAnswers,
-        ctx.currentQuestion.id
-      );
-
-      if (aiResult.match && aiResult.position !== null && aiResult.answerText) {
-        room.gameActor.send({
-          type: correctType,
-          position: aiResult.position,
-          answerText: aiResult.answerText,
-        } as any);
-        generateAnswerAudio(aiResult.position, aiResult.answerText).then((audio) => {
-          if (audio) io.to(room.code).emit("play_audio", { url: audio });
-        });
-      } else {
-        room.gameActor.send({ type: wrongType } as any);
-        // Generate audio for wrong answer
-        generateWrongAnswerAudio(answer).then((audio) => {
-          if (audio) io.to(room.code).emit("play_audio", { url: audio });
-        });
+        // Start 5-second overrule timeout
+        setTimeout(() => {
+          const currentState = getGameState(room);
+          if (currentState === "overruleWindow") {
+            console.log(`[Room ${room.code}] Overrule window expired, validating answer`);
+            room.gameActor!.send({ type: "OVERRULE_TIMEOUT" });
+            // Now validate the pending answer
+            validateAndSendAnswer(io, room, answer, false);
+          }
+        }, OVERRULE_WINDOW_SECONDS * 1000);
+        return;
       }
+
+      // Immediate validation (captain round, final round, or overrule unavailable)
+      await validateAndSendAnswer(io, room, answer, isFinal);
     });
 
     // ── Bank money ──────────────────────────────────────────
@@ -322,15 +291,6 @@ export function registerHandlers(io: AppServer): void {
 
       console.log(`[Room ${room.code}] Nominate suggestion: "${parsed.data.answer}"`);
       room.gameActor.send({ type: "NOMINATE_SUGGESTION", answer: parsed.data.answer });
-
-      // Send suggestion to active player
-      const activeSocketId = room.playerSockets.get(ctx.activePlayerId!);
-      if (activeSocketId) {
-        io.to(activeSocketId).emit("player_state", {
-          ...buildPlayerStateFromGame(room, ctx.activePlayerId!),
-          nominateSuggestion: parsed.data.answer,
-        });
-      }
     });
 
     socket.on("accept_nominate", async () => {
@@ -393,6 +353,9 @@ export function registerHandlers(io: AppServer): void {
 
       console.log(`[Room ${room.code}] Overrule with: "${parsed.data.replacementAnswer}"`);
 
+      // Transition machine to overruleInput
+      room.gameActor.send({ type: "USE_OVERRULE" });
+
       // First check the original pending answer
       const originalAnswer = ctx.pendingAnswer;
       let originalWasCorrect = false;
@@ -405,6 +368,15 @@ export function registerHandlers(io: AppServer): void {
           originalWasCorrect = true;
           originalPosition = origResult.position;
           originalAnswerText = origResult.answerText;
+        } else if (!origResult.alreadyFound) {
+          // Try Tier 2 for the original answer
+          const remaining = ctx.currentQuestion.answers.filter((a) => !ctx.revealedPositions.has(a.position));
+          const aiOrig = await checkAnswerWithOpenAI(originalAnswer, ctx.currentQuestion.category, ctx.currentQuestion.question, remaining, ctx.currentQuestion.id);
+          if (aiOrig.match && aiOrig.position !== null && aiOrig.answerText) {
+            originalWasCorrect = true;
+            originalPosition = aiOrig.position;
+            originalAnswerText = aiOrig.answerText;
+          }
         }
       }
 
@@ -563,43 +535,95 @@ function broadcastPlayerStates(io: AppServer, room: Room): void {
 }
 
 function startTimerSync(io: AppServer, room: Room): void {
-  // Clear any existing timer
-  if (room.timerInterval) {
-    clearInterval(room.timerInterval);
-    room.timerInterval = null;
-  }
+  // Only start one persistent interval per room
+  if (room.timerInterval) return;
+
+  let lastSentDeadline: number | null = null;
+  let timerFired = false;
 
   room.timerInterval = setInterval(() => {
+    if (!room.gameActor) {
+      clearInterval(room.timerInterval!);
+      room.timerInterval = null;
+      return;
+    }
+
     const ctx = getGameContext(room);
     if (!ctx?.timerDeadline) {
-      if (room.timerInterval) {
-        clearInterval(room.timerInterval);
-        room.timerInterval = null;
-      }
+      // No active timer — send 0 and wait
       return;
+    }
+
+    // Reset fired flag when deadline changes (new timer started)
+    if (ctx.timerDeadline !== lastSentDeadline) {
+      lastSentDeadline = ctx.timerDeadline;
+      timerFired = false;
     }
 
     const secondsRemaining = Math.max(0, Math.ceil((ctx.timerDeadline - Date.now()) / 1000));
     io.to(room.code).emit("timer_sync", { secondsRemaining });
 
-    if (secondsRemaining <= 0) {
-      // Timer expired
-      if (room.timerInterval) {
-        clearInterval(room.timerInterval);
-        room.timerInterval = null;
-      }
-      if (room.gameActor) {
-        const gameState = getGameState(room);
-        const isFinal = gameState === "finalRound";
-        const isVote = gameState === "finalVote";
-        if (isVote) {
-          room.gameActor.send({ type: "VOTE_TIMER_EXPIRED" });
-        } else if (isFinal) {
-          room.gameActor.send({ type: "FINAL_TIMER_EXPIRED" });
-        } else {
-          room.gameActor.send({ type: "TIMER_EXPIRED" });
-        }
+    if (secondsRemaining <= 0 && !timerFired) {
+      timerFired = true;
+      const gameState = getGameState(room);
+      const isFinal = gameState === "finalRound";
+      const isVote = gameState === "finalVote";
+      if (isVote) {
+        room.gameActor.send({ type: "VOTE_TIMER_EXPIRED" });
+      } else if (isFinal) {
+        room.gameActor.send({ type: "FINAL_TIMER_EXPIRED" });
+      } else {
+        room.gameActor.send({ type: "TIMER_EXPIRED" });
       }
     }
   }, 1000);
+}
+
+async function validateAndSendAnswer(
+  io: AppServer,
+  room: Room,
+  answer: string,
+  isFinal: boolean
+): Promise<void> {
+  if (!room.gameActor) return;
+  const ctx = getGameContext(room);
+  if (!ctx?.currentQuestion) return;
+
+  const correctType = isFinal ? "FINAL_VALIDATED_CORRECT" as const : "VALIDATED_CORRECT" as const;
+  const wrongType = isFinal ? "FINAL_VALIDATED_WRONG" as const : "VALIDATED_WRONG" as const;
+
+  // Tier 1: Local match
+  const localResult = checkAnswerLocal(answer, ctx.currentQuestion.answers, ctx.revealedPositions);
+
+  if (localResult.match) {
+    room.gameActor.send({ type: correctType, position: localResult.position, answerText: localResult.answerText } as any);
+    generateAnswerAudio(localResult.position, localResult.answerText).then((audio) => {
+      if (audio) io.to(room.code).emit("play_audio", { url: audio });
+    });
+    return;
+  }
+
+  if (!localResult.match && localResult.alreadyFound) {
+    const alreadyFoundType = isFinal ? "FINAL_VALIDATED_ALREADY_FOUND" as const : "VALIDATED_ALREADY_FOUND" as const;
+    room.gameActor.send({ type: alreadyFoundType } as any);
+    return;
+  }
+
+  // Tier 2: OpenAI fuzzy match
+  const remainingAnswers = ctx.currentQuestion.answers.filter((a) => !ctx.revealedPositions.has(a.position));
+  const aiResult = await checkAnswerWithOpenAI(
+    answer, ctx.currentQuestion.category, ctx.currentQuestion.question, remainingAnswers, ctx.currentQuestion.id
+  );
+
+  if (aiResult.match && aiResult.position !== null && aiResult.answerText) {
+    room.gameActor.send({ type: correctType, position: aiResult.position, answerText: aiResult.answerText } as any);
+    generateAnswerAudio(aiResult.position, aiResult.answerText).then((audio) => {
+      if (audio) io.to(room.code).emit("play_audio", { url: audio });
+    });
+  } else {
+    room.gameActor.send({ type: wrongType } as any);
+    generateWrongAnswerAudio(answer).then((audio) => {
+      if (audio) io.to(room.code).emit("play_audio", { url: audio });
+    });
+  }
 }
