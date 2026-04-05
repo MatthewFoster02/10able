@@ -62,6 +62,9 @@ export interface GameContext {
   // Round order
   playOrder: string[];
 
+  // Track last revealed answer for audio playback
+  lastRevealedPosition: number | null;
+
   // Final round
   finalVoteOptions: [QuestionData, QuestionData] | null;
   finalVotes: Record<string, number>; // playerId -> 0 or 1
@@ -482,7 +485,7 @@ export const gameMachine = setup({
           ? { ...slot, answer: answer?.answer ?? null, revealed: true, revealedByPlayer: null }
           : slot
       );
-      return { board };
+      return { board, lastRevealedPosition: next.position };
     }),
 
     // ── Final round actions ─────────────────────────────────
@@ -702,6 +705,7 @@ export const gameMachine = setup({
     roundHistory: [],
     timerDeadline: null,
     playOrder: [],
+    lastRevealedPosition: null,
     finalVoteOptions: null,
     finalVotes: {},
     finalTurnOrder: [],

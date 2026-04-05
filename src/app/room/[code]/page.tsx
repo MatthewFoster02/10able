@@ -53,35 +53,53 @@ export default function RoomDisplayPage() {
   return <RoomView roomCode={roomCode} />;
 }
 
+function RoomCodeBadge({ code }: { code: string }) {
+  return (
+    <div className="fixed top-4 right-4 z-50 rounded-lg bg-slate-900/80 px-4 py-2 backdrop-blur">
+      <span className="text-xs uppercase tracking-widest text-slate-500">Room </span>
+      <span className="text-sm font-bold tracking-wider text-amber-400">{code}</span>
+    </div>
+  );
+}
+
 function RoomView({ roomCode }: { roomCode: string }) {
   const { socket } = useSocket();
   const state = useRoomStore();
 
-  switch (state.phase) {
-    case "lobby":
-      return <LobbyDisplay roomCode={roomCode} players={state.players} />;
-    case "round_intro":
-      return <RoundIntroDisplay state={state} />;
-    case "captain_picking":
-      return <CaptainPickingDisplay state={state} />;
-    case "individual_round":
-    case "captain_round":
-      return <ActiveRoundDisplay state={state} socket={socket} />;
-    case "round_end":
-      return <RoundEndDisplay state={state} socket={socket} roomCode={roomCode} />;
-    case "final_vote":
-      return <FinalVoteDisplay state={state} />;
-    case "final_round":
-      return <FinalRoundDisplay state={state} socket={socket} />;
-    case "game_over":
-      return <GameOverDisplay state={state} />;
-    default:
-      return (
-        <div className="flex min-h-screen items-center justify-center">
-          <p className="text-xl text-slate-400">Phase: {state.phase}</p>
-        </div>
-      );
-  }
+  const content = (() => {
+    switch (state.phase) {
+      case "lobby":
+        return <LobbyDisplay roomCode={roomCode} players={state.players} />;
+      case "round_intro":
+        return <RoundIntroDisplay state={state} />;
+      case "captain_picking":
+        return <CaptainPickingDisplay state={state} />;
+      case "individual_round":
+      case "captain_round":
+        return <ActiveRoundDisplay state={state} socket={socket} />;
+      case "round_end":
+        return <RoundEndDisplay state={state} socket={socket} roomCode={roomCode} />;
+      case "final_vote":
+        return <FinalVoteDisplay state={state} />;
+      case "final_round":
+        return <FinalRoundDisplay state={state} socket={socket} />;
+      case "game_over":
+        return <GameOverDisplay state={state} />;
+      default:
+        return (
+          <div className="flex min-h-screen items-center justify-center">
+            <p className="text-xl text-slate-400">Phase: {state.phase}</p>
+          </div>
+        );
+    }
+  })();
+
+  return (
+    <>
+      <RoomCodeBadge code={roomCode} />
+      {content}
+    </>
+  );
 }
 
 // ── Lobby ──────────────────────────────────────────────────

@@ -179,6 +179,19 @@ export function registerHandlers(io: AppServer): void {
             }
           }
 
+          // Play audio for revealed answers during round end
+          if (currentState === "roundEnd") {
+            const ctx = snapshot.context;
+            if (ctx?.lastRevealedPosition && ctx?.currentQuestion) {
+              const answer = ctx.currentQuestion.answers.find(
+                (a: any) => a.position === ctx.lastRevealedPosition
+              );
+              if (answer?.audio) {
+                io.to(room.code).emit("play_audio", { url: answer.audio });
+              }
+            }
+          }
+
           lastState = currentState;
         });
 
